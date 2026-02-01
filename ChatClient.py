@@ -88,28 +88,36 @@ def fazer_handshake(ligacao, chave_publica_servidor):
         raise RuntimeError("Handshake falhou.")
     return chave
 
-def receber_mensagem_inicial(socket_cliente, chave):
-    pacote = receber_pacote(socket_cliente)
-    mensagem = decifrar_aes(chav, pacote)
-    print("Servidor:", mensagem.decode(errors="ignore"), end="")
 
 def chat_loop(socket_cliente, chave):
 
-    pacote_inicial = receber_pacote(socket_cliente)
-    mensagem_inicial = decifrar_aes(chave, pacote_inicial).decode(errors="ignore")
-    print("Servidor: ", mensagem_inicial, end="")
+    try:
+        pacote_inicial = receber_pacote(socket_cliente)
+        mensagem_inicial = decifrar_aes(chave, pacote_inicial).decode(errors="ignore")
+        print("Servidor:", mensagem_inicial.strip())
+    except ConnectionError:
+        print("O Servidor desligou.")
+        return
     
     while True:
         texto = input("> ")
         if texto.lower() in ("sair", "exit", "quit"):
             break
 
-        pacote_cifrado = cifrar_aes(chave, (texto + "\n").encode())
+        pacote_cifrado = cifrar_aes(chave, texto.encode())
         enviar_pacote(socket_cliente, pacote_cifrado)
         
-        pacote_resposta = receber_pacote(socket_cliente)
-        resposta = decifrar_aes(chave, pacote_resposta).decode(errors="ignore")
-        print("Servidor:", resposta, end="")
+        try:
+            pacote_resposta = receber_pacote(socket_cliente)
+            resposta = decifrar_aes(chave, pacote_resposta).decode(errors="ignore")
+        except ConnectionError:
+            print("O Servidor desligou.")
+            break
+        except Exception:
+            print("Resposta invalida/alterada.")
+            continue  
+        
+        print("Servidor:", resposta.strip())
 
 
 def main():

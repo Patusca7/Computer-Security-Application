@@ -1,6 +1,9 @@
 import os
 import socket
 import struct 
+import json
+import base64
+from datetime import datetime
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
 from Crypto.Random import get_random_bytes
@@ -10,6 +13,112 @@ PORTA = 12345
 TAMANHO_BUFFER = 4096
 FICHEIRO_CHAVE_PRIVADA = "servidor_privada.pem"
 FICHEIRO_CHAVE_PUBLICA = "servidor_publica.pem"
+PASTA_FICHEIRO = "./mensagens_arquivadas"
+
+def base64_encode(dados):
+    return base64.b64encode(dados).decode("ascii")
+
+def base64_decode(texto):
+    return base64.b64decode(texto.encode("ascii"))
+
+def garantir_pasta_ficheiro():
+    os.makedirs(PASTA_FICHEIRO, exist_ok=True)
+
+def caminho_seguro_sessao(nome_ficheiro):
+    nome_limpo = os.path.basename(nome_ficheiro.strip())    # impede path traversal
+    return os.path.join(PASTA_FICHEIRO, nome_limpo)
+
+def listar_sessoes():
+    if not os.path.isdir(PASTA_FICHEIRO):
+        return "Não existe a pasta com as sessoes.\n"
+
+    ficheiros = sorted([f for f in os.listdir(PASTA_FICHEIRO) if f.startswith("sessao_") and f.endswith(".txt")])
+
+    if not ficheiros:
+        return "Sem sessoes.\n"
+
+    linhas = []
+    for i, f in enumerate(ficheiros, start=1):
+        linhas.append(f"{i}) {f}")
+    return "\n".join(linhas) + "\n"
+
+def arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_mensagem):
+    
+    cifra_aes = AES.new(chave_ficheiro, AES.MODE_EAX)
+    texto_cifrado, tag = cifra_aes.encrypt_and_digest(mensagem)
+
+    registo = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "info_da_mensagem": info_mensagem,
+        "aes_eax_nonce": base64_encode(cifra_aes.nonce),
+        "aes_eax_tag": base64_encode(tag),
+        "aes_eax_texto_cifrado": base64_encode(texto_cifrado),
+    }
+
+    with open(caminho_sessao, "a", encoding="utf-8") as f:
+        f.write(json.dumps(registo, ensure_ascii=False) + "\n")
+
+def desencriptar_sessao(caminho_sessao, chave_privada_rsa):
+
+    if not os.path.exists(caminho_sessao):
+        return "Ficheiro nao existe.\n"
+
+    with open(caminho_sessao, "r", encoding="utf-8") as f:
+        linhas = f.read().splitlines()
+
+    if not linhas:
+        return "Ficheiro vazio.\n"
+
+    try:
+        cabecalho = json.loads(linhas[0])
+        chave_ficheiro_cifrada_b64 = cabecalho.get("rsa_oaep_chave_ficheiro")
+        if not chave_ficheiro_cifrada_b64:
+            return "Cabecalho sem chave do ficheiro.\n"
+    except Exception:
+        return "Cabecalho invalido.\n"
+
+    # Decifrar a chave AES do ficheiro (com a privada do servidor)
+    try:
+        chave_ficheiro_cifrada = base64_decode(chave_ficheiro_cifrada_b64)
+        cifra_rsa = PKCS1_OAEP.new(chave_privada_rsa)
+        chave_ficheiro = cifra_rsa.decrypt(chave_ficheiro_cifrada)
+    except Exception:
+        return "Nao foi possivel decifrar a chave do ficheiro.\n"
+
+    # Decifrar todas as mensagens
+    saida = []
+    for linha in linhas[1:]:
+        if not linha.strip():
+            continue
+
+        try:
+            registo = json.loads(linha)
+            nonce = base64_decode(registo["aes_eax_nonce"])
+            tag = base64_decode(registo["aes_eax_tag"])
+            ct = base64_decode(registo["aes_eax_texto_cifrado"])
+
+            cifra = AES.new(chave_ficheiro, AES.MODE_EAX, nonce=nonce)
+            msg_bytes = cifra.decrypt(ct)
+            cifra.verify(tag)
+
+            direcao = registo.get("info_da_mensagem", {}).get("direcao", "?")
+            ts = registo.get("timestamp", "?").replace("T", " ")
+            msg_txt = msg_bytes.decode(errors="ignore").strip()
+
+            remetente = "Desconhecido"
+            if direcao in ("Cliente -> Servidor"):
+                remetente = "Cliente"
+            elif direcao in ("Servidor -> Cliente"):
+                remetente = "Servidor"
+            saida.append(f"{ts} {remetente}: {msg_txt}")
+            
+        except Exception:
+            saida.append("Linha invalida/alterada no ficheiro.")
+
+    if not saida:
+        return "[i] Sem mensagens.\n"
+
+    return "\n".join(saida) + "\n"
 
 def enviar_pacote(ligacao, dados):
     ligacao.sendall(struct.pack("!I", len(dados)) + dados)
@@ -105,9 +214,29 @@ def aceitar_cliente(socket_servidor):
     return ligacao, endereco
 
 
-def chat_loop(ligacao, chave):
+def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cliente):
     enviar_pacote(ligacao, cifrar_aes(chave, b"Bem-vindo ao chat seguro!\nEnvie a sua mensagem para o servidor\n")) # Mensagem inicial cifrada
 
+    garantir_pasta_ficheiro()
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    caminho_sessao = os.path.join(PASTA_FICHEIRO,f"sessao_{timestamp}_{endereco_cliente[0]}_{endereco_cliente[1]}.txt")
+
+    chave_ficheiro = get_random_bytes(16)
+    cifra_rsa = PKCS1_OAEP.new(chave_publica_rsa)
+    chave_ficheiro_cifrada = cifra_rsa.encrypt(chave_ficheiro)
+    
+    cabecalho = {
+            "tipo": "sessao_chat",
+            "timestamp_inicio": datetime.now().isoformat(timespec="seconds"),
+            "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}",
+            "rsa_oaep_chave_ficheiro": base64_encode(chave_ficheiro_cifrada),
+            "aes_modo": "EAX"
+        }
+    
+    with open(caminho_sessao, "w", encoding="utf-8") as f:
+       f.write(json.dumps(cabecalho, ensure_ascii=False) + "\n")
+            
     while True:
         try:
             pacote = receber_pacote(ligacao)
@@ -115,24 +244,49 @@ def chat_loop(ligacao, chave):
             break
 
         try:
-            mensagem = decifrar_aes(chave, pacote).decode(errors="ignore")
+            mensagem = decifrar_aes(chave, pacote)
         except Exception:
-            enviar_pacote(ligacao, cifrar_aes(chave, b"[ERRO] Mensagem invalida/alterada.\n"))
+            enviar_pacote(ligacao, cifrar_aes(chave, b"Mensagem invalida/alterada.\n"))
             continue
 
         if not mensagem:
             continue
+        
+        mensagem_texto = mensagem.decode(errors="ignore").strip()
+        if mensagem_texto.upper() == "LIST":
+            enviar_pacote(ligacao, cifrar_aes(chave, listar_sessoes().encode()))
+            continue
+        
+        if mensagem_texto.upper().startswith("GET ") or mensagem_texto.upper().startswith("VIEW "):
+            partes = mensagem_texto.split(maxsplit=1)
+            if len(partes) != 2:
+                enviar_pacote(ligacao, cifrar_aes(chave, b"Uso: GET/VIEW <ficheiro_sessao.txt>\n"))
+                continue
+        
+            nome_ficheiro = partes[1].strip()
+            caminho = caminho_seguro_sessao(nome_ficheiro)
+        
+            texto_claro = desencriptar_sessao(caminho, chave_privada_rsa)
+            enviar_pacote(ligacao, cifrar_aes(chave, texto_claro.encode()))
+            continue
 
-        print("Cliente:", mensagem, end="")
+        info_mensagem = {"direcao": "Cliente -> Servidor","cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}"}
+        arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_mensagem)
+        
+        print("Cliente:", mensagem_texto)
+        enviar_pacote(ligacao, cifrar_aes(chave, mensagem))
 
-        enviar_pacote(ligacao, cifrar_aes(chave, mensagem.encode()))
+        info_resposta = {"direcao": "Servidor -> Cliente","cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}"}
+        arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_resposta)
 
 def main():
     os.system("clear")
     os.system("figlet Servidor")
+    
     garantir_chaves_rsa()
-    chave_privada = carregar_chave_privada()  # carrega a chave privada RSA do servidor
-
+    chave_privada = carregar_chave_privada()
+    chave_publica = chave_privada.publickey()
+    
     socket_servidor = criar_socket_servidor(HOST, PORTA)
     print(f"Servidor ligado!") 
 
@@ -140,8 +294,8 @@ def main():
     print("Ligado a:", endereco)
 
     try:
-        chave = fazer_handshake(ligacao, chave_privada)  # recebe e decifra a chave AES
-        chat_loop(ligacao, chave)                # inicia o chat
+        chave = fazer_handshake(ligacao, chave_privada)
+        chat_loop(ligacao, chave, chave_publica, chave_privada, endereco)
     finally:
         ligacao.close()                
         socket_servidor.close()        
@@ -150,4 +304,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nServidor encerrado.")
