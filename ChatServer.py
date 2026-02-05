@@ -15,6 +15,79 @@ TAMANHO_BUFFER = 4096
 FICHEIRO_CHAVE_PRIVADA = "servidor_privada.pem"
 FICHEIRO_CHAVE_PUBLICA = "servidor_publica.pem"
 PASTA_FICHEIRO = "./mensagens_arquivadas"
+SESSOES_LOCK = threading.Lock()
+SESSOES_ATIVAS = {}  
+SEND_LOCKS = {} 
+
+def _get_send_lock(ligacao):
+    with SESSOES_LOCK:
+        lock = SEND_LOCKS.get(id(ligacao))
+        if lock is None:
+            lock = threading.Lock()
+            SEND_LOCKS[id(ligacao)] = lock
+        return lock
+        
+def adicionar_sessao(nome_sessao, ligacao, chave_sessao, username):
+    with SESSOES_LOCK:
+        SESSOES_ATIVAS.setdefault(nome_sessao, set()).add((ligacao, chave_sessao, username))
+
+def remover_sessao(nome_sessao, conn):
+    with SESSOES_LOCK:
+        subscricoes_sessao = SESSOES_ATIVAS.get(nome_sessao)
+        if not subscricoes_sessao:
+            return
+
+        subscricoes_restantes = set()
+        for (conn_atual, chave_atual, user_atual) in subscricoes_sessao:
+            if conn_atual is not conn:
+                subscricoes_restantes.add((conn_atual, chave_atual, user_atual))
+
+        if subscricoes_restantes:
+            SESSOES_ATIVAS[nome_sessao] = subscricoes_restantes
+        else:
+            del SESSOES_ATIVAS[nome_sessao]
+
+
+def remover_cliente_(conn):
+    with SESSOES_LOCK:
+        sessoes_para_apagar = []
+
+        for nome_sessao, subscricoes in SESSOES_ATIVAS.items():
+            subscricoes_filtradas = {
+                (conn_atual, chave_atual, user_atual)
+                for (conn_atual, chave_atual, user_atual) in subscricoes
+                if conn_atual is not conn
+            }
+
+            if subscricoes_filtradas:
+                SESSOES_ATIVAS[nome_sessao] = subscricoes_filtradas
+            else:
+                sessoes_para_apagar.append(nome_sessao)
+
+        for nome_sessao in sessoes_para_apagar:
+            del SESSOES_ATIVAS[nome_sessao]
+
+        SEND_LOCKS.pop(id(conn), None)
+
+
+def broadcast_para_sessao(nome_sessao, sender_username, texto_msg):
+    with SESSOES_LOCK:
+        subscricoes = list(SESSOES_ATIVAS.get(nome_sessao, set()))
+
+    payload = f"MSG {nome_sessao} {sender_username} {texto_msg}\n".encode("utf-8")
+
+    entregues = []
+    for (conn, chave_canal, user_destino) in subscricoes:
+        try:
+            lock_envio = _get_send_lock(conn)
+            with lock_envio:
+                enviar_pacote(conn, cifrar_aes(chave_canal, payload))
+            entregues.append(user_destino)
+        except Exception:
+            pass
+
+    return entregues
+
 
 def base64_encode(dados):
     return base64.b64encode(dados).decode("ascii")
@@ -34,6 +107,12 @@ def caminho_seguro_sessao(nome_ficheiro):
     if not alvo.startswith(base):
         raise ValueError("Nome de sessão inválido.")
     return caminho
+
+def utilizador_e_owner(username, caminho_sessao):
+    cabecalho = ler_cabecalho_sessao(caminho_sessao)
+    if not isinstance(cabecalho, dict):
+        return False
+    return cabecalho.get("owner") == username
 
 def ler_cabecalho_sessao(caminho_sessao):
     try:
@@ -137,11 +216,12 @@ def desencriptar_sessao(caminho_sessao, chave_privada_rsa):
             ts = registo.get("timestamp", "?").replace("T", " ")
             msg_txt = msg_bytes.decode(errors="ignore").strip()
 
-            remetente = "Desconhecido"
-            if direcao in ("Cliente -> Servidor"):
-                remetente = "Cliente"
-            elif direcao in ("Servidor -> Cliente"):
-                remetente = "Servidor"
+            if isinstance(direcao):
+                if "->" in direcao:
+                    remetente = direcao.split("->", 1)[0].strip()
+                else:
+                    remetente = direcao.strip()
+            
             saida.append(f"{ts} {remetente}: {msg_txt}")
             
         except Exception:
@@ -266,16 +346,20 @@ def fazer_handshake(ligacao, chave_privada_rsa):
 def receber_username(ligacao, chave_aes):
     pacote = receber_pacote(ligacao)
     msg = decifrar_aes(chave_aes, pacote).decode(errors="ignore").strip()
+    
     if not msg.upper().startswith("USER "):
         enviar_pacote(ligacao, cifrar_aes(chave_aes, b"Use 'USER <username>'\n"))
-        raise RuntimeError("Cliente não enviou USER.")
+        continue
+        
     username = msg.split(" ", 1)[1].strip()
     if not validar_username(username):
         enviar_pacote(ligacao, cifrar_aes(chave_aes, "Username invalido, use entre 3 e 20 caracteres, apenas letras e numeros.\n".encode()))
-        raise RuntimeError("Username inválido.")
+        continue
+        
     if not registar_username(username):
-        enviar_pacote(ligacao, cifrar_aes(chave_aes, "Esse username ja existe.\n".encode()))
-        raise RuntimeError("Username existe.")
+        enviar_pacote(ligacao, cifrar_aes(chave_aes, "Esse username esta ativo.\n".encode()))
+        continue
+        
     enviar_pacote(ligacao, cifrar_aes(chave_aes, b"OK\n"))
     return username
 
@@ -399,8 +483,10 @@ def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cli
     # cria sessão ativa inicial
     caminho_sessao, chave_ficheiro = criar_sessao(username, endereco_cliente, chave_publica_rsa)
     sessao_ativa_nome = os.path.basename(caminho_sessao)
+    adicionar_sessao(sessao_ativa_nome, ligacao, chave, username)
 
-    enviar_pacote(ligacao, cifrar_aes( chave, ( "Bem-vindo ao chat seguro!\n" f"Utilizador: {username}\n" f"Sessão ativa: {sessao_ativa_nome}\n" "Comandos: LIST | GET <s> | DELETE <s> | DOWNLOAD <s> | OPEN <s> | INVITE <s> <u>\n").encode()))
+    enviar_pacote(ligacao, cifrar_aes( chave, ( f"Bem-vindo {username}!\n" 
+    "Estão disponíveis os comandos:\n\t LIST: mostra todos os chats\n\t GET <sessao>: mostra o conteudo de um chat\n\t DELETE <sessao>: apaga um chat\n\t DOWNLOAD <sessao>: descarrega um chat\n\t OPEN <sessao>: entra noutro chat\n\t INVITE <sessao> <user>: convida um user para o chat escolhido\n").encode()))
 
     while True:
         try:
@@ -450,7 +536,7 @@ def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cli
             nome = partes[1].strip()
             caminho = caminho_seguro_sessao(nome)
 
-            if not utilizador_sessao(username, caminho):
+            if not utilizador_e_owner(username, caminho):
                 enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões para apagar esta sessão.\n".encode("utf-8")))
                 continue
 
@@ -461,11 +547,11 @@ def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cli
                     sessao_ativa_nome = os.path.basename(caminho_sessao)
                     enviar_pacote(ligacao, cifrar_aes(chave, f"Apagada. Nova sessão ativa: {sessao_ativa_nome}\n".encode()))
                 else:
-                    enviar_pacote(ligacao, cifrar_aes(chave, "Sessão apagada.\n").encode("utf-8"))
+                    enviar_pacote(ligacao, cifrar_aes(chave, "Sessão apagada.\n".encode("utf-8")))
             except FileNotFoundError:
-                enviar_pacote(ligacao, cifrar_aes(chave, "Sessão não encontrada.\n").encode("utf-8"))
+                enviar_pacote(ligacao, cifrar_aes(chave, "Sessão não encontrada.\n".encode("utf-8")))
             except Exception:
-                enviar_pacote(ligacao, cifrar_aes(chave, "Erro ao apagar sessão.\n").encode("utf-8"))
+                enviar_pacote(ligacao, cifrar_aes(chave, "Erro ao apagar sessão.\n".encode("utf-8")))
             continue
 
         # DOWNLOAD
@@ -477,10 +563,10 @@ def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cli
             caminho = caminho_seguro_sessao(nome)
 
             if not utilizador_sessao(username, caminho):
-                enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões para descarregar esta sessão.\n").encode("utf-8"))
+                enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões para descarregar esta sessão.\n".encode("utf-8")))
                 continue
             if not os.path.isfile(caminho):
-                enviar_pacote(ligacao, cifrar_aes(chave, "Sessão não encontrada.\n").encode("utf-8"))
+                enviar_pacote(ligacao, cifrar_aes(chave, "Sessão não encontrada.\n".encode("utf-8")))
                 continue
 
             with open(caminho, "rb") as f:
@@ -498,24 +584,34 @@ def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cli
             caminho = caminho_seguro_sessao(nome)
 
             if not utilizador_sessao(username, caminho):
-                enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões para abrir esta sessão.\n").encode("utf-8"))
+                enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões para abrir esta sessão.\n".encode("utf-8")))
                 continue
 
             try:
                 chave_ficheiro = obter_chave_ficheiro_da_sessao(caminho, chave_privada_rsa)
             except Exception:
-                enviar_pacote(ligacao, cifrar_aes(chave, "Não foi possível abrir (chave inválida).\n").encode("utf-8"))
+                enviar_pacote(ligacao, cifrar_aes(chave, "Não foi possível abrir (chave inválida).\n".encode("utf-8")))
                 continue
 
+            remover_sessao(sessao_ativa_nome, ligacao)
+            
             caminho_sessao = caminho
             sessao_ativa_nome = os.path.basename(caminho_sessao)
+
+            adicionar_sessao(sessao_ativa_nome, ligacao, chave, username)
+            
             enviar_pacote(ligacao, cifrar_aes(chave, f"Sessão ativa = {sessao_ativa_nome}\n".encode()))
             continue
 
         # NEW
         if cmd == "NEW":
+            remover_sessao(sessao_ativa_nome, ligacao)
+            
             caminho_sessao, chave_ficheiro = criar_sessao(username, endereco_cliente, chave_publica_rsa)
             sessao_ativa_nome = os.path.basename(caminho_sessao)
+
+            adicionar_sessao(sessao_ativa_nome, ligacao, chave, username)
+            
             enviar_pacote(ligacao, cifrar_aes(chave, f"Nova sessão ativa = {sessao_ativa_nome}\n".encode()))
             continue
 
@@ -535,13 +631,25 @@ def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cli
             enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões na sessão ativa (use OPEN/NEW).\n".encode("utf-8")))
             continue
 
-        info_in = {"direcao": "Cliente -> Servidor", "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}", "username": username}
+        texto_msg = mensagem.decode(errors="ignore").strip()
+        
+        info_in = {"direcao": f"{username} -> Servidor", "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}", "username": username}
         arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_in)
 
-        enviar_pacote(ligacao, cifrar_aes(chave, mensagem))
-
-        info_out = {"direcao": "Servidor -> Cliente", "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}", "username": username}
-        arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_out)
+        #with SESSOES_LOCK:
+        #    subs = SESSOES_ATIVAS.get(sessao_ativa_nome, set())
+        #    print("DEBUG sessão:", sessao_ativa_nome, "subscritos:", [u for (_, _, u) in subs])
+            
+        destinatarios = broadcast_para_sessao(sessao_ativa_nome, username, texto_msg)
+        outros_destinatarios = [u for u in destinatarios if u != username]
+        
+        if outros_destinatarios:
+            for user_destino in outros_destinatarios:
+                info_out = {"direcao": f"Servidor -> {user_destino}", "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}", "username": username}
+                arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_out)
+        else:
+            info_out = {"direcao": f"Servidor -> {username}", "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}", "username": username}
+            arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_out)
 
 
 def main():

@@ -2,6 +2,10 @@ import os
 import socket
 import struct
 import base64
+import readline
+import sys
+import threading
+import queue
 
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
@@ -11,6 +15,16 @@ HOST = "192.168.1.244"
 PORTA = 12345
 TAMANHO_BUFFER = 4096
 FICHEIRO_CHAVE_PUBLICA = "servidor_publica.pem"
+print_lock = threading.Lock()
+
+def print_sem_estragar_prompt(linha):
+    with print_lock:
+        buffer_atual = readline.get_line_buffer()
+        sys.stdout.write("\r\033[K")
+        sys.stdout.write(linha + "\n")
+        sys.stdout.write("> " + buffer_atual)
+        sys.stdout.flush()
+
 
 def enviar_pacote(ligacao, dados):
     ligacao.sendall(struct.pack("!I", len(dados)) + dados)
@@ -23,12 +37,58 @@ def receber_n_bytes(ligacao, num_bytes):
             raise ConnectionError("Ligação fechada.")
         buffer += parte
     return buffer
+    
+def comando_resposta(texto):
+    if not texto:
+        return False
+    op = texto.split()[0].upper()
+    return op in {"LIST", "GET", "VIEW", "OPEN", "NEW", "INVITE", "DELETE", "DOWNLOAD"}
 
 def receber_pacote(ligacao):
     tamanho_mensagem_bytes = receber_n_bytes(ligacao, 4)   #Ler o tamanho da mensagem
     tamanho_mensagem = struct.unpack("!I", tamanho_mensagem_bytes)[0]   #Converter em Int
     mensagem = receber_n_bytes(ligacao, tamanho_mensagem)  #Ler exatamente esses n bytes
     return mensagem
+
+def recetor(socket_cliente, chave, fila, username):
+    while True:
+        try:
+            pacote = receber_pacote(socket_cliente)
+            texto = decifrar_aes(chave, pacote).decode(errors="ignore").strip()
+
+            if texto.startswith("MSG "):
+                remetente, texto_msg = tratar_msg(texto, username)
+                if remetente == "PROPRIO":
+                    continue
+
+                print_sem_estragar_prompt(f"{remetente}: {texto_msg}")
+                continue
+                
+                with print_lock:
+                    if remetente == "Servidor":
+                        print(f"\nServidor: {texto_msg}")
+                    else:
+                        print(f"\n{remetente}: {texto_msg}")
+                    print("> ", end="", flush=True)
+                continue
+
+            fila.put(texto)
+
+        except Exception:
+            fila.put(None)
+            break
+
+
+def tratar_msg(resposta, username):
+    try:
+        _, nome_sessao, remetente, texto_msg = resposta.split(" ", 3)
+        texto_msg = texto_msg.strip()
+        if remetente == username:
+            return  ("PROPRIO", "")
+        return (remetente, texto_msg)
+    except ValueError:
+        return ("Servidor", resposta)
+
 
 #AES
 def cifrar_aes(chave, mensagem):
@@ -156,8 +216,7 @@ def reescrever_comando(comando, mapa, comando_padrao="OPEN"):
 def chat_loop(socket_cliente, chave, username):
     mapa_sessoes = {}
     
-    pacote_cifrado = cifrar_aes(chave, f"USER {username}\n".encode())
-    enviar_pacote(socket_cliente, pacote_cifrado)
+    enviar_pacote(socket_cliente, cifrar_aes(chave, f"USER {username}\n".encode()))
 
     try:
         pacote_resposta = receber_pacote(socket_cliente)
@@ -170,8 +229,9 @@ def chat_loop(socket_cliente, chave, username):
         return
 
     print("Servidor:", resposta)
+
     if not resposta.startswith("OK"):
-        return  # username recusado
+            return
 
     try:
         pacote_help = receber_pacote(socket_cliente)
@@ -181,64 +241,106 @@ def chat_loop(socket_cliente, chave, username):
     except Exception:
         pass
 
+    fila = queue.Queue()
+    t = threading.Thread(target=recetor, args=(socket_cliente, chave, fila, username), daemon=True)
+    t.start()
+
     while True:
+        try:
+            while True:
+                mensagem_recebida = fila.get_nowait()
+                if mensagem_recebida is None:
+                    print("O Servidor desligou.")
+                    return
+                    
+                texto_recebido = mensagem_recebida.strip()
+                    
+                if texto.startswith("MSG "):
+                    remetente, texto_msg = tratar_msg(texto, username)
+                
+                    if remetente == "PROPRIO":
+                        continue
+                
+                    print_sem_estragar_prompt(f"{remetente}: {texto_msg}")
+                    continue
+                else:
+                    print(f"\nServidor: {texto_recebido}")
+                    
+        except queue.Empty:
+            pass
+                         
         texto = input("> ").strip()
         if texto.lower() in ("sair", "exit", "quit"):
             break
         if not texto:
             continue
         texto_enviar = reescrever_comando(texto, mapa_sessoes)
-        
-        pacote_cifrado = cifrar_aes(chave, (texto + "\n").encode())
+        pacote_cifrado = cifrar_aes(chave, (texto_enviar + "\n").encode())
         enviar_pacote(socket_cliente, pacote_cifrado)
 
-        try:
-            pacote_resposta = receber_pacote(socket_cliente)
-            resposta = decifrar_aes(chave, pacote_resposta).decode(errors="ignore")
-        except ConnectionError:
-            print("O Servidor desligou.")
-            break
-        except Exception:
-            print("Resposta invalida/alterada.")
+        if not comando_resposta(texto_enviar):
             continue
-
-        resp = resposta.strip()
-        
-        novo_mapa = parse_list_map(resp)
-        if novo_mapa:
-            mapa_sessoes = novo_mapa
             
-        if resp.startswith("DOWNLOAD_OK "):
-            try:
-                _, nome, b64 = resp.split(" ", 2)
-                os.makedirs("downloads", exist_ok=True)
-                caminho = os.path.join("downloads", os.path.basename(nome))
-                with open(caminho, "wb") as f:
-                    f.write(base64.b64decode(b64.encode()))
-                print(f"Servidor: OK (download guardado em {caminho})")
-            except Exception:
-                print("Servidor: DOWNLOAD inválido/erro a guardar.")
-            continue
-
-        print("Servidor:", resp)
-
-
+        while True:
+            msg = fila.get()
+            if msg is None:
+                print("O Servidor desligou.")
+                return
+            resp = msg.strip()
+        
+            novo_mapa = parse_list_map(resp)
+            if novo_mapa:
+                mapa_sessoes = novo_mapa
+        
+            if resp.startswith("DOWNLOAD_OK "):
+                try:
+                    _, nome, b64 = resp.split(" ", 2)
+                    os.makedirs("downloads", exist_ok=True)
+                    caminho = os.path.join("downloads", os.path.basename(nome))
+                    with open(caminho, "wb") as f:
+                        f.write(base64.b64decode(b64.encode()))
+                    print(f"Servidor: OK (download guardado em {caminho})")
+                except Exception:
+                    print("Servidor: DOWNLOAD inválido/erro a guardar.")
+                break
+        
+            print("Servidor:", resp)
+            break
 
 def main():
     os.system("clear")
     os.system("figlet Cliente")
 
-    username = input("Username: ").strip()
-    
-    chave_publica = carregar_chave_publica_servidor()
     ligacao = criar_socket_cliente(HOST, PORTA)
 
     try:
-        chave = fazer_handshake(ligacao, chave_publica)
+        chave = fazer_handshake(ligacao, carregar_chave_publica_servidor())
+        while True:
+            username = input("Username: ").strip()
+            
+            if username.lower() in ("exit", "quit", "sair"):
+                print("A sair.")
+                return
+                
+            enviar_pacote(ligacao, cifrar_aes(chave, f"USER {username}\n".encode()))
+
+            try:
+                pacote = receber_pacote(ligacao)
+                resposta = decifrar_aes(chave, pacote).decode(errors="ignore").strip()
+            except Exception:
+                print("Erro ao contactar o servidor.")
+                return
+            print("Servidor:", resposta)
+
+            if resposta.startswith("OK"):
+                break  
+            else:
+                print("Username inválido. Tenta novamente.\n")
+
         chat_loop(ligacao, chave, username)
+
     finally:
         ligacao.close()
-
 
 if __name__ == "__main__":
     main()
