@@ -3,6 +3,7 @@ import socket
 import struct 
 import json
 import base64
+import threading
 from datetime import datetime
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
@@ -25,21 +26,52 @@ def garantir_pasta_ficheiro():
     os.makedirs(PASTA_FICHEIRO, exist_ok=True)
 
 def caminho_seguro_sessao(nome_ficheiro):
-    nome_limpo = os.path.basename(nome_ficheiro.strip())    # impede path traversal
-    return os.path.join(PASTA_FICHEIRO, nome_limpo)
+    nome_limpo = os.path.basename((nome_ficheiro or "").strip())
+    caminho = os.path.join(PASTA_FICHEIRO, nome_limpo)
 
-def listar_sessoes():
+    base = os.path.abspath(PASTA_FICHEIRO) + os.sep
+    alvo = os.path.abspath(caminho)
+    if not alvo.startswith(base):
+        raise ValueError("Nome de sessão inválido.")
+    return caminho
+
+def ler_cabecalho_sessao(caminho_sessao):
+    try:
+        with open(caminho_sessao, "r", encoding="utf-8") as f:
+            primeira = f.readline()
+        if not primeira:
+            return None
+        return json.loads(primeira.strip())
+    except Exception:
+        return None
+
+def utilizador_sessao(username, caminho_sessao):
+    cabecalho = ler_cabecalho_sessao(caminho_sessao)
+    if not cabecalho:
+        return False
+    utilizadores = cabecalho.get("utilizadores", [])
+    return username in utilizadores
+
+def listar_sessoes_utilizador(username):
     if not os.path.isdir(PASTA_FICHEIRO):
-        return "Não existe a pasta com as sessoes.\n"
+        return "Não existe a pasta com as sessões.\n"
 
-    ficheiros = sorted([f for f in os.listdir(PASTA_FICHEIRO) if f.startswith("sessao_") and f.endswith(".txt")])
-
+    ficheiros = sorted(
+        [f for f in os.listdir(PASTA_FICHEIRO) if f.startswith("sessao_") and f.endswith(".txt")]
+    )
     if not ficheiros:
-        return "Sem sessoes.\n"
+        return "Sem sessões.\n"
 
-    linhas = []
-    for i, f in enumerate(ficheiros, start=1):
-        linhas.append(f"{i}) {f}")
+    permitidos = []
+    for f in ficheiros:
+        caminho = os.path.join(PASTA_FICHEIRO, f)
+        if utilizador_sessao(username, caminho):
+            permitidos.append(f)
+
+    if not permitidos:
+        return "Sem sessões visíveis para este utilizador.\n"
+
+    linhas = [f"{i}) {nome}" for i, nome in enumerate(permitidos, start=1)]
     return "\n".join(linhas) + "\n"
 
 def arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_mensagem):
@@ -192,12 +224,34 @@ def carregar_chave_privada():
     with open(FICHEIRO_CHAVE_PRIVADA, "rb") as f:
         return RSA.import_key(f.read())
 
+#Threads
+_lock_usernames = threading.Lock()
+_usernames_ativos = set()
+
+def validar_username(username):
+    if not (3 <= len(username) <= 20):
+        return False
+    for ch in username:
+        if not (ch.isalnum() or ch == "_"):
+            return False
+    return True
+
+def registar_username(username):
+    with _lock_usernames:
+        if username in _usernames_ativos:
+            return False
+        _usernames_ativos.add(username)
+        return True
+
+def libertar_username(username):
+    with _lock_usernames:
+        _usernames_ativos.discard(username)
 #Servidor
 def criar_socket_servidor(host, porta):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) #Apenas porque só tenho a porta para isto
     s.bind((host, porta))
-    s.listen(1)
+    s.listen(50)
     return s
 
 def fazer_handshake(ligacao, chave_privada_rsa):
@@ -209,34 +263,145 @@ def fazer_handshake(ligacao, chave_privada_rsa):
     enviar_pacote(ligacao, cifrar_aes(chave, b"handshake_ok\n"))
     return chave
 
+def receber_username(ligacao, chave_aes):
+    pacote = receber_pacote(ligacao)
+    msg = decifrar_aes(chave_aes, pacote).decode(errors="ignore").strip()
+    if not msg.upper().startswith("USER "):
+        enviar_pacote(ligacao, cifrar_aes(chave_aes, b"Use 'USER <username>'\n"))
+        raise RuntimeError("Cliente não enviou USER.")
+    username = msg.split(" ", 1)[1].strip()
+    if not validar_username(username):
+        enviar_pacote(ligacao, cifrar_aes(chave_aes, "Username invalido, use entre 3 e 20 caracteres, apenas letras e numeros.\n".encode()))
+        raise RuntimeError("Username inválido.")
+    if not registar_username(username):
+        enviar_pacote(ligacao, cifrar_aes(chave_aes, "Esse username ja existe.\n".encode()))
+        raise RuntimeError("Username existe.")
+    enviar_pacote(ligacao, cifrar_aes(chave_aes, b"OK\n"))
+    return username
+
+def enviar_erro(ligacao, chave, texto):
+    enviar_pacote(ligacao, cifrar_aes(chave, (texto.rstrip() + "\n").encode()))
+
 def aceitar_cliente(socket_servidor):
     ligacao, endereco = socket_servidor.accept()
     return ligacao, endereco
 
+def add_user_to_session(requester, session_filename, new_user):
+    if not validar_username(new_user):
+        return "Username inválido (3-20 chars, letras/números/_).\n"
 
-def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cliente):
-    enviar_pacote(ligacao, cifrar_aes(chave, b"Bem-vindo ao chat seguro!\nEnvie a sua mensagem para o servidor\n")) # Mensagem inicial cifrada
+    caminho = caminho_seguro_sessao(session_filename)
+    if not os.path.isfile(caminho):
+        return "Sessão não encontrada.\n"
+
+    try:
+        with open(caminho, "r", encoding="utf-8") as f:
+            linhas = f.readlines()
+        if not linhas:
+            return "Sessão vazia.\n"
+        cabecalho = json.loads(linhas[0].strip())
+    except Exception:
+        return "Sessão com cabeçalho inválido.\n"
+
+    utilizadores = cabecalho.get("utilizadores", [])
+    if not isinstance(utilizadores, list):
+        utilizadores = []
+    utilizadores = [u for u in utilizadores if isinstance(u, str)]
+
+    if requester not in utilizadores:
+        return "Sem permissões para adicionar utilizadores a esta sessão.\n"
+
+    if new_user in utilizadores:
+        return "Utilizador já tinha acesso.\n"
+
+    utilizadores.append(new_user)
+    cabecalho["utilizadores"] = sorted(set(utilizadores))
+
+    linhas[0] = json.dumps(cabecalho, ensure_ascii=False) + "\n"
+    try:
+        with open(caminho, "w", encoding="utf-8") as f:
+            f.writelines(linhas)
+    except Exception:
+        return "Não foi possível atualizar a sessão.\n"
+
+    return f"{new_user} adicionado à sessão.\n"
+
+def criar_sessao(owner, endereco_cliente, chave_publica_rsa):
 
     garantir_pasta_ficheiro()
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    caminho_sessao = os.path.join(PASTA_FICHEIRO,f"sessao_{timestamp}_{endereco_cliente[0]}_{endereco_cliente[1]}.txt")
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    caminho_sessao = os.path.join(PASTA_FICHEIRO, f"sessao_{timestamp}_{owner}.txt")
+
+    # chave AES do ficheiro (para cifrar cada registo no disco)
     chave_ficheiro = get_random_bytes(16)
+
+    # cifra a chave do ficheiro com a chave pública do servidor
     cifra_rsa = PKCS1_OAEP.new(chave_publica_rsa)
     chave_ficheiro_cifrada = cifra_rsa.encrypt(chave_ficheiro)
-    
+
     cabecalho = {
-            "tipo": "sessao_chat",
-            "timestamp_inicio": datetime.now().isoformat(timespec="seconds"),
-            "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}",
-            "rsa_oaep_chave_ficheiro": base64_encode(chave_ficheiro_cifrada),
-            "aes_modo": "EAX"
-        }
-    
+        "tipo": "sessao_chat",
+        "timestamp_inicio": datetime.now().isoformat(timespec="seconds"),
+        "cliente_criador": f"{endereco_cliente[0]}:{endereco_cliente[1]}",
+        "owner": owner,
+        "utilizadores": [owner], 
+        "rsa_oaep_chave_ficheiro": base64_encode(chave_ficheiro_cifrada),
+        "aes_modo": "EAX",
+    }
+
     with open(caminho_sessao, "w", encoding="utf-8") as f:
-       f.write(json.dumps(cabecalho, ensure_ascii=False) + "\n")
-            
+        f.write(json.dumps(cabecalho, ensure_ascii=False) + "\n")
+
+    return caminho_sessao, chave_ficheiro
+
+def obter_chave_ficheiro_da_sessao(caminho_sessao, chave_privada_rsa):
+
+    cabecalho = ler_cabecalho_sessao(caminho_sessao)
+    if not isinstance(cabecalho, dict):
+        raise ValueError("Sessão com cabeçalho inválido.")
+
+    b64 = cabecalho.get("rsa_oaep_chave_ficheiro")
+    if not b64:
+        raise ValueError("Cabeçalho sem rsa_oaep_chave_ficheiro.")
+
+    chave_ficheiro_cifrada = base64_decode(b64)
+    cifra_rsa = PKCS1_OAEP.new(chave_privada_rsa)
+    return cifra_rsa.decrypt(chave_ficheiro_cifrada)
+
+def handle_cliente(ligacao, endereco_cliente, chave_publica_rsa, chave_privada_rsa):
+    username = None
+    chave_sessao = None
+    try:
+        chave_sessao = fazer_handshake(ligacao, chave_privada_rsa)
+
+        username = receber_username(ligacao, chave_sessao)
+
+        chat_loop(ligacao, chave_sessao, chave_publica_rsa, chave_privada_rsa, endereco_cliente, username)
+
+    except Exception as e:
+        try:
+            if chave_sessao:
+                enviar_erro(ligacao, chave_sessao, f"ERRO: {e}")
+        except Exception:
+            pass
+    finally:
+        if username:
+            libertar_username(username)
+        try:
+            ligacao.close()
+        except Exception:
+            pass
+
+
+def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cliente, username):
+
+    # cria sessão ativa inicial
+    caminho_sessao, chave_ficheiro = criar_sessao(username, endereco_cliente, chave_publica_rsa)
+    sessao_ativa_nome = os.path.basename(caminho_sessao)
+
+    enviar_pacote(ligacao, cifrar_aes( chave, ( "Bem-vindo ao chat seguro!\n" f"Utilizador: {username}\n" f"Sessão ativa: {sessao_ativa_nome}\n" "Comandos: LIST | GET <s> | DELETE <s> | DOWNLOAD <s> | OPEN <s> | INVITE <s> <u>\n").encode()))
+
     while True:
         try:
             pacote = receber_pacote(ligacao)
@@ -246,43 +411,144 @@ def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cli
         try:
             mensagem = decifrar_aes(chave, pacote)
         except Exception:
-            enviar_pacote(ligacao, cifrar_aes(chave, b"Mensagem invalida/alterada.\n"))
+            enviar_pacote(ligacao, cifrar_aes(chave, "Mensagem inválida/alterada.\n".encode("utf-8")))
             continue
 
-        if not mensagem:
+        texto = mensagem.decode(errors="ignore").strip()
+        if not texto:
             continue
-        
-        mensagem_texto = mensagem.decode(errors="ignore").strip()
-        if mensagem_texto.upper() == "LIST":
-            enviar_pacote(ligacao, cifrar_aes(chave, listar_sessoes().encode()))
+
+        partes = texto.split()
+        cmd = partes[0].upper()
+
+        # LIST
+        if cmd == "LIST":
+            enviar_pacote(ligacao, cifrar_aes(chave, listar_sessoes_utilizador(username).encode()))
             continue
-        
-        if mensagem_texto.upper().startswith("GET ") or mensagem_texto.upper().startswith("VIEW "):
-            partes = mensagem_texto.split(maxsplit=1)
+
+        # GET/VIEW
+        if cmd in ("GET", "VIEW"):
             if len(partes) != 2:
-                enviar_pacote(ligacao, cifrar_aes(chave, b"Uso: GET/VIEW <ficheiro_sessao.txt>\n"))
+                enviar_pacote(ligacao, cifrar_aes(chave, b"Uso: GET/VIEW <sessao.txt>\n"))
                 continue
-        
-            nome_ficheiro = partes[1].strip()
-            caminho = caminho_seguro_sessao(nome_ficheiro)
-        
-            texto_claro = desencriptar_sessao(caminho, chave_privada_rsa)
-            enviar_pacote(ligacao, cifrar_aes(chave, texto_claro.encode()))
+            nome = partes[1].strip()
+            caminho = caminho_seguro_sessao(nome)
+
+            if not utilizador_sessao(username, caminho):
+                enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões para esta sessão.\n".encode("utf-8")))
+                continue
+
+            mensagem = desencriptar_sessao(caminho, chave_privada_rsa)
+            enviar_pacote(ligacao, cifrar_aes(chave, mensagem.encode()))
             continue
 
-        info_mensagem = {"direcao": "Cliente -> Servidor","cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}"}
-        arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_mensagem)
-        
-        print("Cliente:", mensagem_texto)
+        # DELETE
+        if cmd == "DELETE":
+            if len(partes) != 2:
+                enviar_pacote(ligacao, cifrar_aes(chave, b"Uso: DELETE <sessao.txt>\n"))
+                continue
+            nome = partes[1].strip()
+            caminho = caminho_seguro_sessao(nome)
+
+            if not utilizador_sessao(username, caminho):
+                enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões para apagar esta sessão.\n".encode("utf-8")))
+                continue
+
+            try:
+                os.remove(caminho)
+                if os.path.basename(caminho) == sessao_ativa_nome:
+                    caminho_sessao, chave_ficheiro = criar_sessao(username, endereco_cliente, chave_publica_rsa)
+                    sessao_ativa_nome = os.path.basename(caminho_sessao)
+                    enviar_pacote(ligacao, cifrar_aes(chave, f"Apagada. Nova sessão ativa: {sessao_ativa_nome}\n".encode()))
+                else:
+                    enviar_pacote(ligacao, cifrar_aes(chave, "Sessão apagada.\n").encode("utf-8"))
+            except FileNotFoundError:
+                enviar_pacote(ligacao, cifrar_aes(chave, "Sessão não encontrada.\n").encode("utf-8"))
+            except Exception:
+                enviar_pacote(ligacao, cifrar_aes(chave, "Erro ao apagar sessão.\n").encode("utf-8"))
+            continue
+
+        # DOWNLOAD
+        if cmd == "DOWNLOAD":
+            if len(partes) != 2:
+                enviar_pacote(ligacao, cifrar_aes(chave, b"Uso: DOWNLOAD <sessao.txt>\n"))
+                continue
+            nome = partes[1].strip()
+            caminho = caminho_seguro_sessao(nome)
+
+            if not utilizador_sessao(username, caminho):
+                enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões para descarregar esta sessão.\n").encode("utf-8"))
+                continue
+            if not os.path.isfile(caminho):
+                enviar_pacote(ligacao, cifrar_aes(chave, "Sessão não encontrada.\n").encode("utf-8"))
+                continue
+
+            with open(caminho, "rb") as f:
+                blob = f.read()
+            payload = base64.b64encode(blob)
+            enviar_pacote(ligacao, cifrar_aes(chave, b"DOWNLOAD_OK " + os.path.basename(caminho).encode() + b" " + payload + b"\n"))
+            continue
+
+        # OPEN
+        if cmd == "OPEN":
+            if len(partes) != 2:
+                enviar_pacote(ligacao, cifrar_aes(chave, b"Uso: OPEN <sessao.txt>\n"))
+                continue
+            nome = partes[1].strip()
+            caminho = caminho_seguro_sessao(nome)
+
+            if not utilizador_sessao(username, caminho):
+                enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões para abrir esta sessão.\n").encode("utf-8"))
+                continue
+
+            try:
+                chave_ficheiro = obter_chave_ficheiro_da_sessao(caminho, chave_privada_rsa)
+            except Exception:
+                enviar_pacote(ligacao, cifrar_aes(chave, "Não foi possível abrir (chave inválida).\n").encode("utf-8"))
+                continue
+
+            caminho_sessao = caminho
+            sessao_ativa_nome = os.path.basename(caminho_sessao)
+            enviar_pacote(ligacao, cifrar_aes(chave, f"Sessão ativa = {sessao_ativa_nome}\n".encode()))
+            continue
+
+        # NEW
+        if cmd == "NEW":
+            caminho_sessao, chave_ficheiro = criar_sessao(username, endereco_cliente, chave_publica_rsa)
+            sessao_ativa_nome = os.path.basename(caminho_sessao)
+            enviar_pacote(ligacao, cifrar_aes(chave, f"Nova sessão ativa = {sessao_ativa_nome}\n".encode()))
+            continue
+
+        # INVITE
+        if cmd == "INVITE":
+            if len(partes) != 3:
+                enviar_pacote(ligacao, cifrar_aes(chave, b"Uso: INVITE <sessao.txt> <username>\n"))
+                continue
+            nome = partes[1].strip()
+            novo = partes[2].strip()
+            res = add_user_to_session(username, nome, novo)
+            enviar_pacote(ligacao, cifrar_aes(chave, res.encode()))
+            continue
+
+        # Mensagem normal -> sessão ativa (com ACL)
+        if not utilizador_sessao(username, caminho_sessao):
+            enviar_pacote(ligacao, cifrar_aes(chave, "Sem permissões na sessão ativa (use OPEN/NEW).\n".encode("utf-8")))
+            continue
+
+        info_in = {"direcao": "Cliente -> Servidor", "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}", "username": username}
+        arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_in)
+
         enviar_pacote(ligacao, cifrar_aes(chave, mensagem))
 
-        info_resposta = {"direcao": "Servidor -> Cliente","cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}"}
-        arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_resposta)
+        info_out = {"direcao": "Servidor -> Cliente", "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}", "username": username}
+        arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_out)
+
 
 def main():
     os.system("clear")
     os.system("figlet Servidor")
     
+    garantir_pasta_ficheiro()
     garantir_chaves_rsa()
     chave_privada = carregar_chave_privada()
     chave_publica = chave_privada.publickey()
@@ -290,16 +556,17 @@ def main():
     socket_servidor = criar_socket_servidor(HOST, PORTA)
     print(f"Servidor ligado!") 
 
-    ligacao, endereco = aceitar_cliente(socket_servidor)  
-    print("Ligado a:", endereco)
 
     try:
-        chave = fazer_handshake(ligacao, chave_privada)
-        chat_loop(ligacao, chave, chave_publica, chave_privada, endereco)
+        while True:
+            ligacao, endereco = socket_servidor.accept()
+            t = threading.Thread(target=handle_cliente, args=(ligacao, endereco, chave_publica, chave_privada), daemon=True, )
+
+            t.start()
+    except KeyboardInterrupt:
+        print("\nServidor encerrado.")
     finally:
-        ligacao.close()                
-        socket_servidor.close()        
-        print("Servidor encerrado.")
+        socket_servidor.close()
 
 
 

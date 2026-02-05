@@ -1,6 +1,8 @@
 import os
 import socket
 import struct
+import base64
+
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
 from Crypto.Random import get_random_bytes
@@ -88,25 +90,108 @@ def fazer_handshake(ligacao, chave_publica_servidor):
         raise RuntimeError("Handshake falhou.")
     return chave
 
+def autenticar_username(ligacao, chave_sessao, username):
+    enviar_pacote(ligacao, cifrar_aes(chave_sessao, f"USER {username}\n".encode()))
+    resposta = decifrar_aes(chave_sessao, receber_pacote(ligacao)).decode(errors="ignore")
+    if not resposta.startswith("OK"):
+        raise RuntimeError(resposta.strip())
+    return resposta
 
-def chat_loop(socket_cliente, chave):
+def fazer_download(msg):
+    try:
+        _, nome, b64 = msg.split(" ", 2)
+    except ValueError:
+        print("DOWNLOAD inválido recebido.")
+        return
+
+    os.makedirs("downloads", exist_ok=True)
+    caminho = os.path.join("downloads", os.path.basename(nome))
+    try:
+        blob = base64.b64decode(b64.encode())
+        with open(caminho, "wb") as f:
+            f.write(blob)
+        print(f"DOWNLOAD guardado em: {caminho}")
+    except Exception:
+        print("Falha a guardar download.")
+
+def parse_list_map(texto):
+    m = {}
+    for linha in (texto or "").splitlines():
+        linha = linha.strip()
+        if ")" not in linha:
+            continue
+        esq, dir = linha.split(")", 1)
+        if esq.strip().isdigit() and dir.strip():
+            m[esq.strip()] = dir.strip()
+    return m
+
+
+def reescrever_comando(comando, mapa, comando_padrao="OPEN"):
+    comando = (comando or "").strip()
+    if not comando:
+        return comando
+
+    partes = comando.split()
+
+    if len(partes) == 1 and partes[0].isdigit():
+        if partes[0] in mapa:
+            return f"{comando_padrao} {mapa[partes[0]]}"
+        return comando
+
+    op = partes[0].upper()
+
+    if op in {"OPEN", "GET", "VIEW", "DELETE", "DOWNLOAD"}:
+        if len(partes) == 2 and partes[1].isdigit() and partes[1] in mapa:
+            partes[1] = mapa[partes[1]]
+            return " ".join(partes)
+
+    if op == "INVITE":
+        if len(partes) == 3 and partes[1].isdigit() and partes[1] in mapa:
+            partes[1] = mapa[partes[1]]
+            return " ".join(partes)
+
+    return comando
+
+
+def chat_loop(socket_cliente, chave, username):
+    mapa_sessoes = {}
+    
+    pacote_cifrado = cifrar_aes(chave, f"USER {username}\n".encode())
+    enviar_pacote(socket_cliente, pacote_cifrado)
 
     try:
-        pacote_inicial = receber_pacote(socket_cliente)
-        mensagem_inicial = decifrar_aes(chave, pacote_inicial).decode(errors="ignore")
-        print("Servidor:", mensagem_inicial.strip())
+        pacote_resposta = receber_pacote(socket_cliente)
+        resposta = decifrar_aes(chave, pacote_resposta).decode(errors="ignore").strip()
     except ConnectionError:
         print("O Servidor desligou.")
         return
-    
+    except Exception:
+        print("Resposta invalida/alterada.")
+        return
+
+    print("Servidor:", resposta)
+    if not resposta.startswith("OK"):
+        return  # username recusado
+
+    try:
+        pacote_help = receber_pacote(socket_cliente)
+        help_txt = decifrar_aes(chave, pacote_help).decode(errors="ignore")
+        if help_txt.strip():
+            print("Servidor:", help_txt.strip())
+    except Exception:
+        pass
+
     while True:
-        texto = input("> ")
+        texto = input("> ").strip()
         if texto.lower() in ("sair", "exit", "quit"):
             break
-
-        pacote_cifrado = cifrar_aes(chave, texto.encode())
-        enviar_pacote(socket_cliente, pacote_cifrado)
+        if not texto:
+            continue
+        texto_enviar = reescrever_comando(texto, mapa_sessoes)
         
+        pacote_cifrado = cifrar_aes(chave, (texto + "\n").encode())
+        enviar_pacote(socket_cliente, pacote_cifrado)
+
         try:
             pacote_resposta = receber_pacote(socket_cliente)
             resposta = decifrar_aes(chave, pacote_resposta).decode(errors="ignore")
@@ -115,20 +200,42 @@ def chat_loop(socket_cliente, chave):
             break
         except Exception:
             print("Resposta invalida/alterada.")
-            continue  
+            continue
+
+        resp = resposta.strip()
         
-        print("Servidor:", resposta.strip())
+        novo_mapa = parse_list_map(resp)
+        if novo_mapa:
+            mapa_sessoes = novo_mapa
+            
+        if resp.startswith("DOWNLOAD_OK "):
+            try:
+                _, nome, b64 = resp.split(" ", 2)
+                os.makedirs("downloads", exist_ok=True)
+                caminho = os.path.join("downloads", os.path.basename(nome))
+                with open(caminho, "wb") as f:
+                    f.write(base64.b64decode(b64.encode()))
+                print(f"Servidor: OK (download guardado em {caminho})")
+            except Exception:
+                print("Servidor: DOWNLOAD inválido/erro a guardar.")
+            continue
+
+        print("Servidor:", resp)
+
 
 
 def main():
     os.system("clear")
     os.system("figlet Cliente")
+
+    username = input("Username: ").strip()
+    
     chave_publica = carregar_chave_publica_servidor()
     ligacao = criar_socket_cliente(HOST, PORTA)
 
     try:
         chave = fazer_handshake(ligacao, chave_publica)
-        chat_loop(ligacao, chave)
+        chat_loop(ligacao, chave, username)
     finally:
         ligacao.close()
 
