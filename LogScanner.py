@@ -1,7 +1,38 @@
+"""
+Exercício - Analisar e processar ficheiros de log
+
+Este módulo permite analisar logs de:
+- Autenticação SSH (/var/log/auth.log)
+- Servidor Web Apache (/var/log/apache2/access.log*)
+
+Funcionalidades principais:
+- Extração de IPs, datas, horas, utilizadores e motivos
+- Contagem estatística dos campos
+- Identificação do país de origem via geoiplookup
+- Geração de ficheiros formatados
+- Menus interativos para consulta
+
+"""
+
 import os
 from collections import Counter
 
+BASE_ANALISE = "./analise_logs"
+PASTA_FICHEIROS = os.path.join(BASE_ANALISE, "ficheiro")
+PASTA_DOWNLOAD = os.path.join(BASE_ANALISE, "download")
+
+os.makedirs(BASE_ANALISE, exist_ok=True)
+os.makedirs(PASTA_FICHEIROS, exist_ok=True)
+os.makedirs(PASTA_DOWNLOAD, exist_ok=True)
+
+
 def ip_valido(ip):
+    """
+    Verifica se uma string corresponde a um endereço IPv4 válido.
+
+    :param ip: Endereço IPv4 em formato string
+    :return: True se for válido, False caso contrário
+    """
     octetos = ip.split(".")
     if len(octetos) != 4:
         return False
@@ -20,6 +51,13 @@ def ip_valido(ip):
     return True
 
 def contar_e_mostrar(lista, titulo):
+    """
+    Conta ocorrências numa lista e mostra os resultados ordenados.
+
+    :param lista: Lista de valores
+    :param titulo: Título a mostrar no ecrã
+    :return: Objeto Counter com as contagens
+    """
     contagem = Counter(lista)
     print(f"\n{titulo}")
     for valor, total in contagem.most_common():
@@ -28,15 +66,37 @@ def contar_e_mostrar(lista, titulo):
     return contagem
 
 def guardar_ficheiro(texto):
+    """
+    Pergunta ao utilizador se pretende guardar texto num ficheiro.
+
+    :param texto: Texto a guardar
+    :return: None
+    """
     resposta = input("Guardar num ficheiro? (s/n): ").strip().lower()
     
     if resposta == "s":
         nome = input("Qual o nome do ficheiro: ").strip()
-        with open(nome, "w", encoding="utf-8") as file:
+        caminho = os.path.join(PASTA_DOWNLOAD, nome)
+        with open(caminho, "w", encoding="utf-8") as file:
             file.write(texto)
-        print(f"Guardado em: {nome}\n")
+        print(f"Guardado em: {caminho}\n")
 
 def menu_ssh(ips, portas, users, motivos, datas, horas, hostnames, matriz):
+    """
+    Menu de consulta estatística para logs SSH.
+
+    Permite listar IPs, portas, users, motivos, países, datas, horas e hostnames.
+
+    :param ips: Lista de IPs
+    :param portas: Lista de portas
+    :param users: Lista de utilizadores
+    :param motivos: Lista de motivos
+    :param datas: Lista de datas
+    :param horas: Lista de horas
+    :param hostnames: Lista de hostnames
+    :param matriz: Estrutura com registos organizados por IP
+    :return: None
+    """
     while True:
         print("\nVerificar as listagens:")
         print("1 - IP")
@@ -107,6 +167,20 @@ def menu_ssh(ips, portas, users, motivos, datas, horas, hostnames, matriz):
         guardar_ficheiro(resultado)
 
 def menu_apache(ips, status_codes, metodos, paths, datas, horas, matriz):
+    """
+    Menu de consulta estatística para logs Apache.
+
+    Permite listar IPs, códigos HTTP, métodos, paths, países, datas e horas.
+
+    :param ips: Lista de IPs
+    :param status_codes: Lista de códigos HTTP
+    :param metodos: Lista de métodos HTTP
+    :param paths: Lista de paths
+    :param datas: Lista de datas
+    :param horas: Lista de horas
+    :param matriz: Estrutura com registos organizados por IP
+    :return: None
+    """
     while True:
         print("\nVerificar as listagens:")
         print("1 - IP")
@@ -176,9 +250,15 @@ def menu_apache(ips, status_codes, metodos, paths, datas, horas, matriz):
         guardar_ficheiro(resultado)
 
 def analisar_ssh():
-    
-    linhas = os.popen("grep -E 'Failed password|Invalid user' /var/log/auth.log").read().splitlines()
+    """
+    Analisa o ficheiro de logs SSH (/var/log/auth.log).
 
+    Extrai tentativas de login falhadas e utilizadores inválidos,
+    identifica países de origem e gera estatísticas.
+    """
+    
+    linhas = os.popen("grep -hE 'Failed password|Invalid user' /var/log/auth.log* 2>/dev/null").read().splitlines()
+    
     datas = []
     horas = []
     hostnames = []
@@ -271,7 +351,8 @@ def analisar_ssh():
 
         matriz[ip]["pais"] = pais_nome
 
-    with open("texto_formatado_ssh.txt", "w", encoding="utf-8") as file:
+    caminho_ssh = os.path.join(PASTA_FICHEIROS, "texto_formatado_ssh.txt")
+    with open(caminho_ssh, "w", encoding="utf-8") as file:
         for ip, info in matriz.items():
             pais = info["pais"]
             for r in info["registos"]:
@@ -292,7 +373,15 @@ def analisar_ssh():
 
 
 def analisar_apache():    
-    linhas = os.popen(f"cat /var/log/apache2/access.log*").read().splitlines()
+    """
+    Analisa os ficheiros de acesso do Apache (/var/log/apache2/access.log*).
+
+    Extrai IPs, métodos HTTP, paths, códigos de estado, datas e horas,
+    identifica países de origem e gera estatísticas.
+    """
+    
+    linhas = os.popen("zcat -f /var/log/apache2/access.log* 2>/dev/null").read().splitlines()
+    
     
     datas = []
     horas = []
@@ -382,8 +471,9 @@ def analisar_apache():
             pais_nome = "UNKNOWN"
     
         matriz[ip]["pais"] = pais_nome
-    
-    with open("texto_formatado_apache.txt", "w", encoding="utf-8") as file:
+        
+    caminho_apache = os.path.join(PASTA_FICHEIROS, "texto_formatado_apache.txt")
+    with open(caminho_apache, "w", encoding="utf-8") as file:
         for ip, info in matriz.items():
             pais = info["pais"]
             for r in info["registos"]:
@@ -400,6 +490,9 @@ def analisar_apache():
     menu_apache(ips, status_codes, metodos, paths, datas, horas, matriz)
     
 def menu():
+    """
+    Menu principal do programa.
+    """
     os.system('clear')
     os.system('figlet Log Scanner')
     while True:
@@ -422,6 +515,9 @@ def menu():
 
 
 def main():
+    """
+    Função principal do programa.
+    """
     menu()
 
 

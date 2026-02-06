@@ -1,15 +1,37 @@
+"""
+Exercicio - Cliente PortKnocking: Elaborar um client port knocking para abertura de ligação de login por SSH a uma máquina Linux. 
+
+Este módulo implementa um cliente de port knocking que:
+- Solicita ao utilizador o IP do servidor e o utilizador SSH
+- Envia uma sequência de knocks para as portas configuradas no servidor
+- Estabelece uma ligação SSH após a sequência correta
+
+"""
+
 import os
 import time
 
 TEMPO_ENTRE_KNOCKS = 0.7   # segundos
 
 def portas_validas(porta):
+    """
+    Valida um número de porta TCP.
+
+    :param porta: Número da porta (int)
+    :return: True se a porta for válida, False caso contrário
+    """
     if porta < 0 or porta > 65535:
         print("O número da porta tem de ser entre 0 e 65535")
         return False
     return True
 
 def ip_valido(ip):
+    """
+    Verifica se uma string corresponde a um endereço IPv4 válido.
+
+    :param ip: Endereço IP em formato string
+    :return: True se o IP for válido, False caso contrário
+    """
     octetos = ip.split(".")
 
     if len(octetos) != 4:
@@ -30,7 +52,16 @@ def ip_valido(ip):
     return True
 
 def main():
-    os.system(clear)
+    """
+    Função principal do cliente de Port Knocking.
+
+    - Limpa o ecrã e mostra o título
+    - Solicita o IP do servidor e o utilizador SSH
+    - Pede a quantidade de portas e a sequência de knocks
+    - Envia a sequência usando netcat (nc)
+    - Inicia a ligação SSH após a sequência
+    """
+    os.system("clear")
     os.system("figlet Cliente PortKnocking")
 
     while True:

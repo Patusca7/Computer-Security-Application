@@ -1,3 +1,17 @@
+"""
+Exercício - PortScanner que permite detetar e listar que portos de rede se encontram disponíveis numa ou mais máquinas remotas;
+
+Este módulo implementa um scanner de portas TCP com duas opções:
+1) Scan a uma máquina (1 IP)
+2) Scan a várias máquinas (intervalo de IPs na mesma rede /24)
+
+Inclui:
+- Validação de IPv4
+- Validação de intervalo de portas
+- Verificação simples se um IP responde (tentativa TCP)
+- Possibilidade de guardar resultados em ficheiro
+
+"""
 import socket
 import sys
 import os
@@ -6,6 +20,17 @@ from datetime import datetime
 
 
 def ip_valido(ip):
+    """
+    Verifica se uma string corresponde a um endereço IPv4 válido.
+
+    Regras:
+    - 4 octetos separados por '.'
+    - 1º e 4º octeto: 1..255
+    - octetos intermédios: 0..255
+
+    :param ip: Endereço IPv4 em string
+    :return: True se válido, False caso contrário
+    """
     octetos = ip.split(".")
 
     if len(octetos) != 4:
@@ -27,6 +52,13 @@ def ip_valido(ip):
 
 
 def portas_validas(porta_inicial, porta_final):
+    """
+    Valida um intervalo de portas.
+
+    :param porta_inicial: Porta inicial (int)
+    :param porta_final: Porta final (int)
+    :return: True se o intervalo for válido, False caso contrário
+    """
     if porta_inicial < 0 or porta_inicial > 65535:
         print("O número da porta inicial tem de ser entre 0 e 65535")
         return False
@@ -40,19 +72,17 @@ def portas_validas(porta_inicial, porta_final):
         return False
     return True
 
-
-def guardar_resultado(linhas):
-    escolha = input("\nQuer guardar o resultado num ficheiro? (s/n): ").strip().lower()
-    if escolha != "s":
-        return
-    nome = input("Nome do ficheiro: ").strip()
-    if not nome:
-        nome = "resultado.txt"
-    with open(nome, "w", encoding="utf-8") as f:
-        f.write("\n".join(linhas) + "\n")
-
-
 def ip_responde(ip):
+    """
+    Testa se um IP aparenta responder, usando uma tentativa TCP para a porta 1.
+
+    Considera o host "ativo" se:
+    - connect_ex retorna 0 (ligação)
+    - connect_ex retorna ECONNREFUSED (host respondeu mas recusou)
+
+    :param ip: Endereço IPv4
+    :return: True se aparenta responder, False caso contrário
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(1)
     try:
@@ -68,6 +98,14 @@ def ip_responde(ip):
     return False
 
 def gerar_ips_mesma_rede(ip_inicial, ip_final):
+    """
+    Gera uma lista de IPs entre ip_inicial e ip_final assumindo rede /24 (mesmos 3 primeiros octetos).
+
+    :param ip_inicial: IP inicial (string)
+    :param ip_final: IP final (string)
+    :return: Lista de IPs (list[str]) ou None se inválido
+    """
+    
     octetos_ip_inicial = ip_inicial.split(".")
     octetos_ip_final = ip_final.split(".")
 
@@ -93,19 +131,48 @@ def gerar_ips_mesma_rede(ip_inicial, ip_final):
 
     return lista_ips
 
+
+
+def guardar_resultado(linhas):
+    """
+    Pergunta ao utilizador se quer guardar o resultado num ficheiro e, se sim, grava.
+
+    :param linhas: Lista de linhas (list[str]) com o output do scan
+    :return: None
+    """
+    escolha = input("\nQuer guardar o resultado num ficheiro? (s/n): ").strip().lower()
+    if escolha != "s":
+        return
+    nome = input("Nome do ficheiro: ").strip()
+    if not nome:
+        nome = "resultado.txt"
+    with open(nome, "w", encoding="utf-8") as f:
+        f.write("\n".join(linhas) + "\n")
+
 def menu():
+    """
+    Menu principal: escolhe entre scan a 1 máquina, scan a várias máquinas, ou sair.
+
+    :return: Opção escolhida ("1", "2" ou "0")
+    """
     while True:
         print("Escolha a opção que pretende:")
         print("1 - Fazer o scan a uma máquina")
         print("2 - Fazer o scan a várias máquinas")
+        print("0 - Sair")
         opcao = input("Escolha uma opção: ").strip()
 
-        if opcao in ("1", "2"):
+        if opcao in ("1", "2", "0"):
             return opcao
-        print("Introduza 1 ou 2.")
+        print("Introduza 1, 2 ou 0.")
 
 
 def menu_1():
+    """
+    Executa o scan a uma única máquina (1 IP), para um intervalo de portas TCP.
+
+    :return: None
+    """
     linhas = []
 
     while True:
@@ -161,6 +228,12 @@ def menu_1():
 
 
 def menu_2():
+    """
+    Executa o scan a várias máquinas (intervalo de IPs na mesma rede /24),
+    para um intervalo de portas TCP.
+
+    :return: None
+    """
     linhas = []
 
     while True:
@@ -227,16 +300,27 @@ def menu_2():
 
 
 def main():
+    """
+    Função principal:
+    - limpa ecrã
+    - mostra título
+    - executa menu e chama o modo escolhido
+
+    """
     os.system('clear')
     os.system('figlet Port Scanner')
 
     print("\nO script pede o IP da máquina alvo do PortScanner e de seguida vai pedir a porta inicial do scan e a porta final.\n")
 
     option = menu()
-    if option == "1":
-        menu_1()
-    else:
-        menu_2()
+    while True:
+        if option == "1":
+            menu_1()
+        elif option == "2":
+            menu_2()
+        else:
+            sys.exit(1)
+        
 
 
 if __name__ == "__main__":

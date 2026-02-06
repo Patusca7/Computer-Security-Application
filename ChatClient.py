@@ -1,3 +1,14 @@
+"""
+Exercicio - Chat, parte do cliente 
+
+Este módulo implementa o cliente de um sistema de chat cifrado que:
+- Estabelece ligação TCP com o servidor
+- Realiza handshake criptográfico (RSA + AES)
+- Permite autenticação por username
+- Envia e recebe mensagens cifradas
+- Suporta múltiplas sessões, downloads e comandos interativos
+
+"""
 import os
 import socket
 import struct
@@ -14,10 +25,16 @@ from Crypto.Random import get_random_bytes
 HOST = "192.168.1.244"
 PORTA = 12345
 TAMANHO_BUFFER = 4096
-FICHEIRO_CHAVE_PUBLICA = "servidor_publica.pem"
+FICHEIRO_CHAVE_PUBLICA = "./chaves/chat/servidor_publica.pem"
 print_lock = threading.Lock()
+esperando_resposta = threading.Event()
 
 def print_sem_estragar_prompt(linha):
+    """
+    Imprime texto no ecrã sem interferir com o prompt interativo.
+
+    :param linha: Texto a imprimir
+    """
     with print_lock:
         buffer_atual = readline.get_line_buffer()
         sys.stdout.write("\r\033[K")
@@ -27,9 +44,24 @@ def print_sem_estragar_prompt(linha):
 
 
 def enviar_pacote(ligacao, dados):
+    """
+    Envia um pacote precedido do seu tamanho (4 bytes).
+
+    :param ligacao: Socket TCP
+    :param dados: Dados em bytes
+    """
+
     ligacao.sendall(struct.pack("!I", len(dados)) + dados)
 
 def receber_n_bytes(ligacao, num_bytes):
+    """
+    Recebe exatamente N bytes de um socket.
+
+    :param ligacao: Socket TCP
+    :param num_bytes: Número de bytes a receber
+    :return: Bytes recebidos
+    """
+
     buffer = b""
     while len(buffer) < num_bytes:
         parte = ligacao.recv(num_bytes - len(buffer))
@@ -37,61 +69,43 @@ def receber_n_bytes(ligacao, num_bytes):
             raise ConnectionError("Ligação fechada.")
         buffer += parte
     return buffer
-    
+
+def receber_pacote(ligacao):
+    """
+    Recebe um pacote completo (tamanho + dados).
+
+    :param ligacao: Socket TCP
+    :return: Dados recebidos
+    """
+    tamanho_mensagem_bytes = receber_n_bytes(ligacao, 4)   #Ler o tamanho da mensagem
+    tamanho_mensagem = struct.unpack("!I", tamanho_mensagem_bytes)[0]   #Converter em Int
+    mensagem = receber_n_bytes(ligacao, tamanho_mensagem)  #Ler exatamente esses n bytes
+    return mensagem
+        
 def comando_resposta(texto):
+    """
+    Verifica se um comando espera resposta do servidor.
+
+    :param texto: Comando introduzido
+    :return: True se esperar resposta, False caso contrário
+    """
+
     if not texto:
         return False
     op = texto.split()[0].upper()
     return op in {"LIST", "GET", "VIEW", "OPEN", "NEW", "INVITE", "DELETE", "DOWNLOAD"}
 
-def receber_pacote(ligacao):
-    tamanho_mensagem_bytes = receber_n_bytes(ligacao, 4)   #Ler o tamanho da mensagem
-    tamanho_mensagem = struct.unpack("!I", tamanho_mensagem_bytes)[0]   #Converter em Int
-    mensagem = receber_n_bytes(ligacao, tamanho_mensagem)  #Ler exatamente esses n bytes
-    return mensagem
-
-def recetor(socket_cliente, chave, fila, username):
-    while True:
-        try:
-            pacote = receber_pacote(socket_cliente)
-            texto = decifrar_aes(chave, pacote).decode(errors="ignore").strip()
-
-            if texto.startswith("MSG "):
-                remetente, texto_msg = tratar_msg(texto, username)
-                if remetente == "PROPRIO":
-                    continue
-
-                print_sem_estragar_prompt(f"{remetente}: {texto_msg}")
-                continue
-                
-                with print_lock:
-                    if remetente == "Servidor":
-                        print(f"\nServidor: {texto_msg}")
-                    else:
-                        print(f"\n{remetente}: {texto_msg}")
-                    print("> ", end="", flush=True)
-                continue
-
-            fila.put(texto)
-
-        except Exception:
-            fila.put(None)
-            break
-
-
-def tratar_msg(resposta, username):
-    try:
-        _, nome_sessao, remetente, texto_msg = resposta.split(" ", 3)
-        texto_msg = texto_msg.strip()
-        if remetente == username:
-            return  ("PROPRIO", "")
-        return (remetente, texto_msg)
-    except ValueError:
-        return ("Servidor", resposta)
-
 
 #AES
 def cifrar_aes(chave, mensagem):
+    """
+    Cifra dados com AES em modo EAX.
+
+    :param chave: Chave AES
+    :param mensagem: Mensagem em bytes
+    :return: Pacote cifrado
+    """
+
     cifra = AES.new(chave, AES.MODE_EAX)
     texto_cifrado, tag = cifra.encrypt_and_digest(mensagem)
     # nonce_len(2) + nonce | tag_len(2) + tag | ct_len(4) + ct
@@ -100,6 +114,14 @@ def cifrar_aes(chave, mensagem):
     return pacote_cifrado
 
 def decifrar_aes(chave, pacote):
+    """
+    Decifra um pacote cifrado com AES EAX.
+
+    :param chave: Chave AES
+    :param pacote: Pacote cifrado
+    :return: Mensagem original em bytes
+    """
+
     posicao = 0
     tamanho_nonce_bytes = pacote[posicao:posicao+2]
     tamanho_nonce = struct.unpack("!H", tamanho_nonce_bytes)[0]
@@ -129,16 +151,37 @@ def decifrar_aes(chave, pacote):
 
 #RSA
 def carregar_chave_publica_servidor():
+    """
+    Carrega a chave pública RSA do servidor.
+
+    :return: Objeto RSA public key
+    """
     with open(FICHEIRO_CHAVE_PUBLICA, "rb") as f:
         return RSA.import_key(f.read())
 
 #Cliente
 def criar_socket_cliente(host, porta):
+    """
+    Cria e estabelece ligação TCP ao servidor.
+
+    :param host: Endereço do servidor
+    :param porta: Porta TCP
+    :return: Socket ligado
+    """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.connect((host, porta))
     return s
 
 def fazer_handshake(ligacao, chave_publica_servidor):
+    """
+    Realiza handshake criptográfico com o servidor.
+
+    - Gera chave AES
+    - Envia-a cifrada com RSA
+    - Aguarda confirmação cifrada
+
+    :return: Chave AES da sessão
+    """
     chave = get_random_bytes(16)
     cifra_rsa = PKCS1_OAEP.new(chave_publica_servidor) # Prepara o RSA com a chave pública do servidor
     chave_aes_cifrada = cifra_rsa.encrypt(chave) # Cifra a chave AES com a pública do servidor
@@ -150,31 +193,54 @@ def fazer_handshake(ligacao, chave_publica_servidor):
         raise RuntimeError("Handshake falhou.")
     return chave
 
-def autenticar_username(ligacao, chave_sessao, username):
-    enviar_pacote(ligacao, cifrar_aes(chave_sessao, f"USER {username}\n".encode()))
-    resposta = decifrar_aes(chave_sessao, receber_pacote(ligacao)).decode(errors="ignore")
-    if not resposta.startswith("OK"):
-        raise RuntimeError(resposta.strip())
-    return resposta
+def tratar_msg(resposta, username):
+    """
+    Processa mensagens de broadcast.
 
-def fazer_download(msg):
+    :return: (remetente, mensagem)
+    """
     try:
-        _, nome, b64 = msg.split(" ", 2)
+        _, nome_sessao, remetente, texto_msg = resposta.split(" ", 3)
+        texto_msg = texto_msg.strip()
+        if remetente == username:
+            return  ("Eu", texto_msg)
+        return (remetente, texto_msg)
     except ValueError:
-        print("DOWNLOAD inválido recebido.")
-        return
+        return ("Servidor", resposta)
+        
+def recetor(socket_cliente, chave, fila, username):
+    """
+    Thread responsável por receber mensagens do servidor.
 
-    os.makedirs("downloads", exist_ok=True)
-    caminho = os.path.join("downloads", os.path.basename(nome))
-    try:
-        blob = base64.b64decode(b64.encode())
-        with open(caminho, "wb") as f:
-            f.write(blob)
-        print(f"DOWNLOAD guardado em: {caminho}")
-    except Exception:
-        print("Falha a guardar download.")
+    :param socket_cliente: Socket TCP
+    :param chave: Chave AES
+    :param fila: Queue de mensagens
+    :param username: Username local
+    """
+
+    while True:
+        try:
+            pacote = receber_pacote(socket_cliente)
+            texto = decifrar_aes(chave, pacote).decode(errors="ignore").strip()
+
+            if texto.startswith("MSG "):
+                remetente, texto_msg = tratar_msg(texto, username)
+                if remetente == "Eu":
+                    continue
+                print_sem_estragar_prompt(f"{remetente}: {texto_msg}")
+                continue
+                
+            if esperando_resposta.is_set():
+                fila.put(texto)
+            else:
+                print_sem_estragar_prompt(f"Servidor: {texto}")
+                
+        except Exception:
+            fila.put(None)
+            break
 
 def parse_list_map(texto):
+    """Cria mapa índice -> nome a partir de LIST."""
     m = {}
     for linha in (texto or "").splitlines():
         linha = linha.strip()
@@ -187,6 +253,8 @@ def parse_list_map(texto):
 
 
 def reescrever_comando(comando, mapa, comando_padrao="OPEN"):
+    """Permite usar índices numéricos em comandos."""
+    
     comando = (comando or "").strip()
     if not comando:
         return comando
@@ -214,24 +282,11 @@ def reescrever_comando(comando, mapa, comando_padrao="OPEN"):
 
 
 def chat_loop(socket_cliente, chave, username):
+    """
+    Loop principal do chat interativo.
+    """
+
     mapa_sessoes = {}
-    
-    enviar_pacote(socket_cliente, cifrar_aes(chave, f"USER {username}\n".encode()))
-
-    try:
-        pacote_resposta = receber_pacote(socket_cliente)
-        resposta = decifrar_aes(chave, pacote_resposta).decode(errors="ignore").strip()
-    except ConnectionError:
-        print("O Servidor desligou.")
-        return
-    except Exception:
-        print("Resposta invalida/alterada.")
-        return
-
-    print("Servidor:", resposta)
-
-    if not resposta.startswith("OK"):
-            return
 
     try:
         pacote_help = receber_pacote(socket_cliente)
@@ -245,52 +300,55 @@ def chat_loop(socket_cliente, chave, username):
     t = threading.Thread(target=recetor, args=(socket_cliente, chave, fila, username), daemon=True)
     t.start()
 
+    sys.stdout.write("> ")
+    sys.stdout.flush()
+    
     while True:
         try:
             while True:
-                mensagem_recebida = fila.get_nowait()
-                if mensagem_recebida is None:
+                msg = fila.get_nowait()
+                if msg is None:
                     print("O Servidor desligou.")
                     return
-                    
-                texto_recebido = mensagem_recebida.strip()
-                    
-                if texto.startswith("MSG "):
-                    remetente, texto_msg = tratar_msg(texto, username)
                 
-                    if remetente == "PROPRIO":
-                        continue
-                
-                    print_sem_estragar_prompt(f"{remetente}: {texto_msg}")
-                    continue
-                else:
-                    print(f"\nServidor: {texto_recebido}")
-                    
+                if msg.strip():
+                    print_sem_estragar_prompt(f"Servidor: {msg.strip()}")
         except queue.Empty:
             pass
-                         
-        texto = input("> ").strip()
+
+        texto = input().strip()
+
         if texto.lower() in ("sair", "exit", "quit"):
             break
         if not texto:
             continue
+        
+        print_sem_estragar_prompt(f"Eu: {texto}")
+
         texto_enviar = reescrever_comando(texto, mapa_sessoes)
         pacote_cifrado = cifrar_aes(chave, (texto_enviar + "\n").encode())
+        
+        espera = comando_resposta(texto_enviar)
+        if espera:
+            esperando_resposta.set()
+
         enviar_pacote(socket_cliente, pacote_cifrado)
 
-        if not comando_resposta(texto_enviar):
+        if not espera:
             continue
-            
-        while True:
+
+        try:
             msg = fila.get()
             if msg is None:
                 print("O Servidor desligou.")
                 return
+
             resp = msg.strip()
-        
+
             novo_mapa = parse_list_map(resp)
             if novo_mapa:
                 mapa_sessoes = novo_mapa
+
         
             if resp.startswith("DOWNLOAD_OK "):
                 try:
@@ -299,13 +357,14 @@ def chat_loop(socket_cliente, chave, username):
                     caminho = os.path.join("downloads", os.path.basename(nome))
                     with open(caminho, "wb") as f:
                         f.write(base64.b64decode(b64.encode()))
-                    print(f"Servidor: OK (download guardado em {caminho})")
+                    print_sem_estragar_prompt(f"Servidor: OK (download guardado em {caminho})")
                 except Exception:
-                    print("Servidor: DOWNLOAD inválido/erro a guardar.")
-                break
-        
-            print("Servidor:", resp)
-            break
+                    print_sem_estragar_prompt("Servidor: DOWNLOAD inválido/erro a guardar.")
+            else:
+                print_sem_estragar_prompt(f"Servidor: {resp}")
+
+        finally:
+            esperando_resposta.clear()
 
 def main():
     os.system("clear")
@@ -330,7 +389,8 @@ def main():
             except Exception:
                 print("Erro ao contactar o servidor.")
                 return
-            print("Servidor:", resposta)
+            print_sem_estragar_prompt(f"Servidor: {resposta}")
+        
 
             if resposta.startswith("OK"):
                 break  
