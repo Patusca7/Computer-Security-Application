@@ -16,12 +16,18 @@ Funcionalidades principais:
 
 import os
 from collections import Counter
+import csv
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+
 
 BASE_ANALISE = "./analise_logs"
+BASE_DOWNLOAD = "./download"
 PASTA_FICHEIROS = os.path.join(BASE_ANALISE, "ficheiro")
-PASTA_DOWNLOAD = os.path.join(BASE_ANALISE, "download")
+PASTA_DOWNLOAD = os.path.join(BASE_DOWNLOAD, "logscanner")
 
 os.makedirs(BASE_ANALISE, exist_ok=True)
+os.makedirs(BASE_DOWNLOAD, exist_ok=True)
 os.makedirs(PASTA_FICHEIROS, exist_ok=True)
 os.makedirs(PASTA_DOWNLOAD, exist_ok=True)
 
@@ -67,19 +73,71 @@ def contar_e_mostrar(lista, titulo):
 
 def guardar_ficheiro(texto):
     """
-    Pergunta ao utilizador se pretende guardar texto num ficheiro.
-
-    :param texto: Texto a guardar
-    :return: None
+    Guarda o conteúdo em TXT, CSV e PDF usando o mesmo nome.
     """
-    resposta = input("Guardar num ficheiro? (s/n): ").strip().lower()
+    resposta = input("Guardar em ficheiro? (s/n): ").strip().lower()
+    if resposta != "s":
+        return
+    while True:
+        nome = input("Nome do ficheiro: ").strip()
+        if not nome:
+            print("Nome inválido.")
+        break
+
+    caminho_txt = os.path.join(PASTA_DOWNLOAD, f"{nome}.txt")
+    caminho_csv = os.path.join(PASTA_DOWNLOAD, f"{nome}.csv")
+    caminho_pdf = os.path.join(PASTA_DOWNLOAD, f"{nome}.pdf")
+
+    with open(caminho_txt, "w", encoding="utf-8") as f:
+        f.write(texto)
+
+    import csv
+    with open(caminho_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["valor", "total"])
+
+        for linha in texto.splitlines():
+            linha = linha.strip()
+            if not linha:
+                continue
+
+            if ":" in linha:
+                valor, total = linha.split(":", 1)
+                writer.writerow([valor.strip(), total.strip()])
+            else:
+                writer.writerow([linha, ""])
+
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+
+        c = canvas.Canvas(caminho_pdf, pagesize=A4)
+        width, height = A4
+
+        y = height - 60
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(50, y, "Relatório de Segurança")
+
+        y -= 30
+        c.setFont("Helvetica", 10)
+
+        for linha in texto.splitlines():
+            if y < 60:
+                c.showPage()
+                y = height - 60
+                c.setFont("Helvetica", 10)
+
+            c.drawString(50, y, linha[:110])
+            y -= 14
+
+        c.save()
+
+    except Exception as e:
+        print(f"Erro ao gerar PDF: {e}")
+
+    print("\nFicheiros guardados")
+    print(f"\n{caminho_csv}")
     
-    if resposta == "s":
-        nome = input("Qual o nome do ficheiro: ").strip()
-        caminho = os.path.join(PASTA_DOWNLOAD, nome)
-        with open(caminho, "w", encoding="utf-8") as file:
-            file.write(texto)
-        print(f"Guardado em: {caminho}\n")
 
 def menu_ssh(ips, portas, users, motivos, datas, horas, hostnames, matriz):
     """

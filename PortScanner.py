@@ -15,9 +15,15 @@ Inclui:
 import socket
 import sys
 import os
+import time
 import errno
+import csv
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 from datetime import datetime
 
+PASTA_DOWNLOAD = "./download/portscanner/"
+os.makedirs(PASTA_DOWNLOAD, exist_ok=True)
 
 def ip_valido(ip):
     """
@@ -135,19 +141,66 @@ def gerar_ips_mesma_rede(ip_inicial, ip_final):
 
 def guardar_resultado(linhas):
     """
-    Pergunta ao utilizador se quer guardar o resultado num ficheiro e, se sim, grava.
+    Guarda o resultado do PortScanner em TXT, CSV e PDF usando o MESMO nome base.
 
-    :param linhas: Lista de linhas (list[str]) com o output do scan
-    :return: None
+    :param linhas: Lista de strings com o output do scan
     """
-    escolha = input("\nQuer guardar o resultado num ficheiro? (s/n): ").strip().lower()
+    
+    escolha = input("\nQuer guardar o resultado em ficheiro? (s/n): ").strip().lower()
     if escolha != "s":
         return
+
     nome = input("Nome do ficheiro: ").strip()
     if not nome:
-        nome = "resultado.txt"
-    with open(nome, "w", encoding="utf-8") as f:
-        f.write("\n".join(linhas) + "\n")
+        print("Nome inválido.")
+        return
+
+    caminho_txt = os.path.join(PASTA_DOWNLOAD, f"{nome}.txt")
+    caminho_csv = os.path.join(PASTA_DOWNLOAD, f"{nome}.csv")
+    caminho_pdf = os.path.join(PASTA_DOWNLOAD, f"{nome}.pdf")
+
+    with open(caminho_txt, "w", encoding="utf-8") as f:
+        for linha in linhas:
+            f.write(linha + "\n")
+
+    import csv
+    with open(caminho_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["linha"])
+
+        for linha in linhas:
+            writer.writerow([linha])
+
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+
+        c = canvas.Canvas(caminho_pdf, pagesize=A4)
+        width, height = A4
+
+        y = height - 60
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(50, y, "Relatório de Port Scanner")
+
+        y -= 30
+        c.setFont("Helvetica", 10)
+
+        for linha in linhas:
+            if y < 60:
+                c.showPage()
+                y = height - 60
+                c.setFont("Helvetica", 10)
+
+            c.drawString(50, y, linha[:110])
+            y -= 14
+
+        c.save()
+
+    except Exception as e:
+        print(f"Erro ao gerar PDF: {e}")
+
+    print("\nFicheiros gerados")
+    time.sleep(1)
 
 def menu():
     """
@@ -296,7 +349,7 @@ def menu_2():
     print(f"\nO Scan foi completo em {tempo_total}")
 
     guardar_resultado(linhas)
-
+    main()
 
 
 def main():
@@ -307,19 +360,21 @@ def main():
     - executa menu e chama o modo escolhido
 
     """
-    os.system('clear')
-    os.system('figlet Port Scanner')
-
-    print("\nO script pede o IP da máquina alvo do PortScanner e de seguida vai pedir a porta inicial do scan e a porta final.\n")
-
-    option = menu()
     while True:
+    
+        os.system('clear')
+        os.system('figlet Port Scanner')
+
+        print("\nO script pede o IP da máquina alvo do PortScanner e de seguida vai pedir a porta inicial do scan e a porta final.\n")
+
+        option = menu()
+    
         if option == "1":
             menu_1()
         elif option == "2":
             menu_2()
         else:
-            sys.exit(1)
+            break
         
 
 

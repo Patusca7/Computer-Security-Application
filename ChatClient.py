@@ -26,6 +26,12 @@ HOST = "192.168.1.244"
 PORTA = 12345
 TAMANHO_BUFFER = 4096
 FICHEIRO_CHAVE_PUBLICA = "./chaves/chat/servidor_publica.pem"
+BASE_DOWNLOAD = "./download"
+PASTA_CHAT = os.path.join(BASE_DOWNLOAD, "chat")
+
+os.makedirs(BASE_DOWNLOAD, exist_ok=True)
+os.makedirs(PASTA_CHAT, exist_ok=True)
+
 print_lock = threading.Lock()
 esperando_resposta = threading.Event()
 
@@ -353,8 +359,9 @@ def chat_loop(socket_cliente, chave, username):
             if resp.startswith("DOWNLOAD_OK "):
                 try:
                     _, nome, b64 = resp.split(" ", 2)
-                    os.makedirs("downloads", exist_ok=True)
-                    caminho = os.path.join("downloads", os.path.basename(nome))
+                    
+                    caminho = os.path.join(PASTA_CHAT, os.path.basename(nome))
+                
                     with open(caminho, "wb") as f:
                         f.write(base64.b64decode(b64.encode()))
                     print_sem_estragar_prompt(f"Servidor: OK (download guardado em {caminho})")
