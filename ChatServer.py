@@ -398,7 +398,8 @@ def desencriptar_sessao(caminho_sessao, chave_privada_rsa):
             ts = registo.get("timestamp", "?").replace("T", " ")
             msg_txt = msg_bytes.decode(errors="ignore").strip()
 
-            if isinstance(direcao):
+            remetente = "?"
+            if isinstance(direcao, str):
                 if "->" in direcao:
                     remetente = direcao.split("->", 1)[0].strip()
                 else:
@@ -407,10 +408,10 @@ def desencriptar_sessao(caminho_sessao, chave_privada_rsa):
             saida.append(f"{ts} {remetente}: {msg_txt}")
             
         except Exception:
-            saida.append("Linha invalida/alterada no ficheiro.")
+            saida.append(f"Linha invalida/alterada no ficheiro.")
 
     if not saida:
-        return "[i] Sem mensagens.\n"
+        return "Sem mensagens.\n"
 
     return "\n".join(saida) + "\n"
 
