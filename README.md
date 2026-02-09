@@ -1,4 +1,7 @@
 # Aplicação de Segurança Informática
+## ⚠️ Aviso Legal
+Este trabalho foi desenvolvido **exclusivamente em contexto académico**. Qualquer utilização deste projeto **fora desse âmbito** é da **inteira responsabilidade do utilizador**, não podendo o autor ser responsabilizado por usos indevidos, incorretos ou não autorizados.
+
 
 Neste projeto tenho como objetivo a criação de uma aplicação de segurança informática construída com **Python**, implementando as seguintes ferramentas:
 
