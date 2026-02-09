@@ -1,7 +1,4 @@
 # Aplicação de Segurança Informática
-## ⚠️ Aviso Legal
-Este trabalho foi desenvolvido **exclusivamente em contexto académico**. Qualquer utilização deste projeto **fora desse âmbito** é da **inteira responsabilidade do utilizador**, não podendo o autor ser responsabilizado por usos indevidos, incorretos ou não autorizados.
-
 
 Neste projeto tenho como objetivo a criação de uma aplicação de segurança informática construída com **Python**, implementando as seguintes ferramentas:
 
@@ -31,3 +28,6 @@ Além destas funcionalidades, existem algumas **funcionalidades extras** que pod
 9. Deve ser possível, a pedido de um qualquer cliente do sistema de troca de mensagens, a **listagem, remoção e download** de todas as mensagens arquivadas existentes no servidor em que o cliente foi interveniente.  
 
 10. Deve ser possível o **backup/exportação**, com chaves simétricas ou assimétricas, de todas as mensagens trocadas no serviço básico de mensagens **ou** no serviço de mensagens multiutilizador para um ficheiro encriptado, sendo possível desencriptar com as credenciais corretas.
+
+## ⚠️ Aviso Legal
+Este trabalho foi desenvolvido **exclusivamente em contexto académico**. Qualquer utilização deste projeto **fora desse âmbito** é da **inteira responsabilidade do utilizador**, não podendo o autor ser responsabilizado por usos indevidos, incorretos ou não autorizados.
